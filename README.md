@@ -1,40 +1,47 @@
 # Move Attachments With Note
 
-Plugin para Obsidian que move anexos junto com a nota quando a nota muda de pasta.
+Obsidian plugin that moves attachments together with a note when the note changes folder.
 
-## Instalação (manual)
+## Manual installation
 
-1. Compile o plugin:
+1. Build the plugin:
    - `npm install`
    - `npm run build`
-2. Copie os arquivos para:
+2. Copy files to:
    - `<VAULT>/.obsidian/plugins/move-attachments-with-note/`
-3. Arquivos necessários:
+3. Required files:
    - `main.js`
    - `manifest.json`
    - `styles.css`
-4. No Obsidian, habilite o plugin em Community Plugins.
+4. In Obsidian, enable the plugin under Community Plugins.
 
-## Comportamento da v1
+## v1 behavior
 
-- Escuta evento de `rename/move` de nota Markdown.
-- Só atua quando a nota muda de pasta (renomear na mesma pasta é ignorado).
-- Lê anexos referenciados pela nota no `metadataCache.resolvedLinks`.
-- Move apenas anexos não-Markdown que estavam exatamente na mesma pasta antiga da nota.
-- Não move anexos compartilhados por outras notas.
-- Em conflito no destino, cria sufixo incremental: `-1`, `-2`, ...
-- Move usando `app.fileManager.renameFile(...)` para atualização segura de links.
+- Listens to the Markdown note `rename/move` event.
+- Runs only when the note changes folder (rename in same folder is ignored).
+- Reads note references from `metadataCache.resolvedLinks`.
+- Moves only non-Markdown attachments that were exactly in the note's previous folder.
+- Does not move shared attachments referenced by other notes.
+- Resolves destination conflicts with numeric suffixes: `-1`, `-2`, ...
+- Uses `app.fileManager.renameFile(...)` for safe link updates.
 
 ## Logs
 
-Prefixo no console: `[move-attachments-with-note]`
+Console prefix: `[move-attachments-with-note]`
 
-- `info`: carregamento, descarregamento, anexos compartilhados ignorados, resumo por nota.
-- `warn`: conflito de nome resolvido por sufixo, link quebrado.
-- `error`: falha ao mover anexo ou esgotamento de tentativas de nome.
+- `info`: load/unload, shared-attachment skips, per-note summary.
+- `warn`: conflict resolved with suffix, broken link.
+- `error`: attachment move failure or name-attempt exhaustion.
 
-## Limitações da v1
+## v1 limitations
 
-- Sem interface de configuração.
-- Sem confirmação interativa antes de mover.
-- Sem parser manual de links quando `resolvedLinks` está vazio.
+- No settings UI.
+- No interactive confirmation before moving.
+- No manual link parsing fallback when `resolvedLinks` is empty.
+
+## Test fixtures (optional)
+
+To generate automated QA scenarios:
+
+- `node scripts/generate-fixtures.mjs --vault <vault-path>`
+- or set `OBSIDIAN_VAULT_PATH` and run `node scripts/generate-fixtures.mjs`

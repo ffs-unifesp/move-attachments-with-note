@@ -2,10 +2,28 @@
 import fs from "fs";
 import path from "path";
 
-const DEFAULT_VAULT =
-  "/Users/fabiofsilveira/t/2026-obsidian-migration/vaults/TESTES-obsidian-ffs-CLONE-TESTES";
+function getVaultPath() {
+  const args = process.argv.slice(2);
+  const vaultFlagIndex = args.indexOf("--vault");
 
-const vaultPath = path.resolve(process.argv[2] ?? DEFAULT_VAULT);
+  if (vaultFlagIndex >= 0 && args[vaultFlagIndex + 1]) {
+    return args[vaultFlagIndex + 1];
+  }
+
+  if (args[0] && args[0] !== "--vault") {
+    return args[0];
+  }
+
+  if (process.env.OBSIDIAN_VAULT_PATH) {
+    return process.env.OBSIDIAN_VAULT_PATH;
+  }
+
+  throw new Error(
+    "Missing vault path. Use: node scripts/generate-fixtures.mjs --vault <path-to-vault> or set OBSIDIAN_VAULT_PATH."
+  );
+}
+
+const vaultPath = path.resolve(getVaultPath());
 const qaRoot = path.join(vaultPath, "QA");
 
 function ensureDir(dirPath) {
@@ -42,7 +60,7 @@ function scenarioT1() {
   ensureDir(a);
   ensureDir(b);
 
-  const note = path.join(a, "Nota.md");
+  const note = path.join(a, "Note.md");
   const img = path.join(a, "img.png");
   const pdf = path.join(a, "doc.pdf");
 
@@ -51,7 +69,7 @@ function scenarioT1() {
 
   writeTextFile(
     note,
-    `# T1\n\n![[${path.basename(img)}]]\n\n[Documento](${path.basename(pdf)})\n`
+    `# T1\n\n![[${path.basename(img)}]]\n\n[Document](${path.basename(pdf)})\n`
   );
 }
 
@@ -60,7 +78,7 @@ function scenarioT2() {
   const a = path.join(root, "A");
   ensureDir(a);
 
-  const note = path.join(a, "Nota.md");
+  const note = path.join(a, "Note.md");
   const img = path.join(a, "img.png");
 
   touchAttachment(img);
@@ -74,8 +92,8 @@ function scenarioT3() {
   ensureDir(a);
   ensureDir(b);
 
-  const note = path.join(a, "Nota.md");
-  writeTextFile(note, "# T3\n\nSem anexos.\n");
+  const note = path.join(a, "Note.md");
+  writeTextFile(note, "# T3\n\nNo attachments.\n");
 }
 
 function scenarioT4() {
@@ -87,12 +105,12 @@ function scenarioT4() {
   ensureDir(b);
   ensureDir(globalDir);
 
-  const note = path.join(a, "Nota.md");
+  const note = path.join(a, "Note.md");
   const globalImg = path.join(globalDir, "img.png");
   touchAttachment(globalImg);
 
   const link = relLink(note, globalImg);
-  writeTextFile(note, `# T4\n\n![fora](${link})\n`);
+  writeTextFile(note, `# T4\n\n![outside](${link})\n`);
 }
 
 function scenarioT5() {
@@ -105,12 +123,12 @@ function scenarioT5() {
   ensureDir(c);
 
   const shared = path.join(a, "img.png");
-  const note1 = path.join(a, "Nota1.md");
-  const note2 = path.join(c, "Nota2.md");
+  const note1 = path.join(a, "Note1.md");
+  const note2 = path.join(c, "Note2.md");
   touchAttachment(shared);
 
-  writeTextFile(note1, `# T5 Nota1\n\n![[${path.basename(shared)}]]\n`);
-  writeTextFile(note2, `# T5 Nota2\n\n![shared](${relLink(note2, shared)})\n`);
+  writeTextFile(note1, `# T5 Note1\n\n![[${path.basename(shared)}]]\n`);
+  writeTextFile(note2, `# T5 Note2\n\n![shared](${relLink(note2, shared)})\n`);
 }
 
 function scenarioT6() {
@@ -122,7 +140,7 @@ function scenarioT6() {
 
   const srcImg = path.join(a, "img.png");
   const dstImg = path.join(b, "img.png");
-  const note = path.join(a, "Nota.md");
+  const note = path.join(a, "Note.md");
   touchAttachment(srcImg);
   touchAttachment(dstImg);
 
@@ -136,10 +154,10 @@ function scenarioT7() {
   ensureDir(a);
   ensureDir(b);
 
-  const note = path.join(a, "Nota.md");
+  const note = path.join(a, "Note.md");
   writeTextFile(
     note,
-    "# T7\n\nLink quebrado markdown: [missing](arquivo-inexistente.pdf)\n\nWiki quebrado: ![[imagem-inexistente.png]]\n"
+    "# T7\n\nBroken markdown link: [missing](missing-file.pdf)\n\nBroken wiki link: ![[missing-image.png]]\n"
   );
 }
 
@@ -148,7 +166,7 @@ function scenarioT8() {
   const a = path.join(root, "A");
   ensureDir(a);
 
-  const note = path.join(a, "Nota.md");
+  const note = path.join(a, "Note.md");
   const img = path.join(a, "img.png");
   touchAttachment(img);
   writeTextFile(note, `# T8\n\n![[${path.basename(img)}]]\n`);
@@ -161,7 +179,7 @@ function scenarioT9() {
   ensureDir(a);
   ensureDir(b);
 
-  const note = path.join(a, "Nota.md");
+  const note = path.join(a, "Note.md");
   const img = path.join(a, "img.png");
   const pdf = path.join(a, "doc.pdf");
   touchAttachment(img);
@@ -169,7 +187,7 @@ function scenarioT9() {
 
   writeTextFile(
     note,
-    `# T9\n\nWiki:\n![[${path.basename(img)}]]\n\nMarkdown:\n[Documento](${path.basename(pdf)})\n`
+    `# T9\n\nWiki:\n![[${path.basename(img)}]]\n\nMarkdown:\n[Document](${path.basename(pdf)})\n`
   );
 }
 
@@ -180,15 +198,15 @@ function scenarioT10() {
   ensureDir(a);
   ensureDir(b);
 
-  const note = path.join(a, "Nota.md");
-  const img = path.join(a, "imagem ação ã.png");
-  const pdf = path.join(a, "café.pdf");
+  const note = path.join(a, "Note.md");
+  const img = path.join(a, "image a-tilde ã.png");
+  const pdf = path.join(a, "report e-acute é.pdf");
   touchAttachment(img);
   touchAttachment(pdf);
 
   writeTextFile(
     note,
-    `# T10\n\n![[${path.basename(img)}]]\n\n[Arquivo](${path.basename(pdf)})\n`
+    `# T10\n\n![[${path.basename(img)}]]\n\n[File](${path.basename(pdf)})\n`
   );
 }
 
