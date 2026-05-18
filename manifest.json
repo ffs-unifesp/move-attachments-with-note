@@ -1,7 +1,7 @@
 {
   "id": "move-attachments-with-note",
   "name": "Move Attachments With Note",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "minAppVersion": "1.5.0",
   "description": "Automatically move eligible attachments when a note is moved to a different folder.",
   "author": "fabiofsilveira",

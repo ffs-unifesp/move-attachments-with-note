@@ -1,6 +1,6 @@
 {
   "name": "move-attachments-with-note",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Obsidian plugin to move attachments with their note when the note changes folders.",
   "main": "main.js",
   "scripts": {
