@@ -1,0 +1,26 @@
+{
+  "name": "move-attachments-with-note",
+  "version": "0.1.0",
+  "description": "Obsidian plugin to move attachments with their note when the note changes folders.",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "version": "node version-bump.mjs && git add manifest.json versions.json"
+  },
+  "keywords": [
+    "obsidian",
+    "plugin",
+    "attachments"
+  ],
+  "author": "fabiofsilveira",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.12.12",
+    "builtin-modules": "^4.0.0",
+    "esbuild": "^0.25.5",
+    "obsidian": "latest",
+    "tslib": "^2.8.1",
+    "typescript": "^5.8.3"
+  }
+}
