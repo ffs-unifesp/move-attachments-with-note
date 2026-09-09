@@ -3,11 +3,15 @@ import { Menu, Notice, TAbstractFile, TFile, TFolder, normalizePath } from "obsi
 
 import MoveAttachmentsWithNotePlugin from "../src/main";
 import {
+  buildCollectionContent,
   buildCompanionContent,
   buildCompanionContentFromModel,
   buildCompanionIndex,
+  createCollectionNote,
   createCompanionIfNeeded,
+  findAvailableCollectionPath,
   findAvailableCompanionPath,
+  getCommonDirectory,
   isEligibleFile
 } from "../src/companion";
 
@@ -347,6 +351,79 @@ describe("companion note domain logic", () => {
     expect(isEligibleFile(new TFile("README.MD"))).toBe(false);
     expect(isEligibleFile(new TFolder("archive"))).toBe(false);
   });
+
+  it("finds the deepest directory shared by collection sources", () => {
+    expect(
+      getCommonDirectory([
+        new TFile("Projects/A/one.pdf"),
+        new TFile("Projects/A/Sub/two.pdf"),
+        new TFile("Projects/A/three.png")
+      ])
+    ).toBe("Projects/A");
+    expect(getCommonDirectory([new TFile("A/one.pdf"), new TFile("B/two.pdf")])).toBe("");
+  });
+
+  it("allocates a timestamped collision-safe collection path", () => {
+    const now = new Date(2026, 8, 9, 17, 30);
+    const { app } = createTestApp({
+      files: [
+        "Projects/one.pdf",
+        "Projects/two.pdf",
+        "Projects/2026-09-09 17.30 Collection.md"
+      ]
+    });
+
+    expect(
+      findAvailableCollectionPath(
+        app,
+        [new TFile("Projects/one.pdf"), new TFile("Projects/two.pdf")],
+        now
+      )
+    ).toBe("Projects/2026-09-09 17.30 Collection-1.md");
+  });
+
+  it("builds minimal collection content with a sources list and embeds", () => {
+    expect(buildCollectionContent(["one.pdf", "two.pdf"], null, "Collection")).toBe(
+      '---\nsources:\n  - "[[one.pdf]]"\n  - "[[two.pdf]]"\n---\n![[one.pdf]]\n![[two.pdf]]\n'
+    );
+  });
+
+  it("uses a collection model without retaining a singular source", () => {
+    const content = buildCollectionContent(
+      ["one.pdf", "two.pdf"],
+      "---\ntype: collection\nsource: '[[old.pdf]]'\n---\n# {{title}}\n\n{{sources}}\n\n{{embeds}}\n",
+      "Selected files",
+      new Date(2026, 8, 9)
+    );
+
+    expect(content).toContain("type: collection");
+    expect(content).not.toContain("source: '[[old.pdf]]'");
+    expect(content).toContain('sources:\n  - "[[one.pdf]]"\n  - "[[two.pdf]]"');
+    expect(content).toContain("# Selected files\n\n- [[one.pdf]]\n- [[two.pdf]]");
+    expect(content).toContain("![[one.pdf]]\n![[two.pdf]]");
+  });
+
+  it("creates one collection note for multiple selected files", async () => {
+    const now = new Date(2026, 8, 9, 17, 30);
+    const { app, filesByPath, contents } = createTestApp({
+      files: ["Projects/one.pdf", "Projects/two.pdf"]
+    });
+
+    const result = await createCollectionNote(
+      app,
+      [filesByPath.get("Projects/one.pdf") as TFile, filesByPath.get("Projects/two.pdf") as TFile],
+      null,
+      now
+    );
+
+    expect(result).toMatchObject({
+      kind: "created",
+      path: "Projects/2026-09-09 17.30 Collection.md"
+    });
+    expect(contents.get("Projects/2026-09-09 17.30 Collection.md")).toContain(
+      'sources:\n  - "[[one.pdf]]"\n  - "[[two.pdf]]"'
+    );
+  });
 });
 
 describe("companion note flows", () => {
@@ -526,7 +603,9 @@ describe("companion note flows", () => {
   });
 
   it("registers native menus only for the intended File Explorer surfaces", async () => {
-    const { plugin, filesByPath, eventHandlers } = createTestApp({ files: ["paper.pdf", "note.md"] });
+    const { plugin, filesByPath, eventHandlers } = createTestApp({
+      files: ["paper.pdf", "figure.png", "note.md"]
+    });
     await plugin.onload();
 
     const fileMenu = eventHandlers.get("file-menu")!;
@@ -546,6 +625,13 @@ describe("companion note flows", () => {
     const batchMenu = new Menu();
     filesMenu(batchMenu, [filesByPath.get("paper.pdf"), filesByPath.get("note.md")]);
     expect(batchMenu.items.map((item) => item.title)).toEqual(["Create companion notes"]);
+
+    const collectionMenu = new Menu();
+    filesMenu(collectionMenu, [filesByPath.get("paper.pdf"), filesByPath.get("figure.png")]);
+    expect(collectionMenu.items.map((item) => item.title)).toEqual([
+      "Create companion notes",
+      "Create collection note from selected files"
+    ]);
   });
 
   it("registers both Notebook Navigator selection modes through its optional API", async () => {
@@ -578,7 +664,10 @@ describe("companion note flows", () => {
         files: [filesByPath.get("paper.pdf"), filesByPath.get("figure.png"), filesByPath.get("note.md")]
       }
     });
-    expect(batchMenu.items.map((item) => item.title)).toEqual(["Create companion notes"]);
+    expect(batchMenu.items.map((item) => item.title)).toEqual([
+      "Create companion notes",
+      "Create collection note from selected files"
+    ]);
 
     expect(registerFileMenu).toHaveBeenCalledTimes(1);
   });

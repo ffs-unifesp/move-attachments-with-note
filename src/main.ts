@@ -5,6 +5,7 @@ import {
   buildPath,
   buildCompanionIndex,
   CompanionIndex,
+  createCollectionNote,
   createCompanionIfNeeded,
   getDirectory,
   isEligibleFile,
@@ -124,34 +125,51 @@ export default class MoveAttachmentsWithNotePlugin extends Plugin {
   }
 
   private async handleTemplateRename(file: TAbstractFile, oldPath: string): Promise<void> {
-    if (oldPath !== this.settings.companionTemplatePath || !(file instanceof TFile)) {
+    if (!(file instanceof TFile)) {
       return;
     }
 
-    this.settings.companionTemplatePath = file.path;
-    await this.saveSettings();
+    let changed = false;
+    if (oldPath === this.settings.companionTemplatePath) {
+      this.settings.companionTemplatePath = file.path;
+      changed = true;
+    }
+    if (oldPath === this.settings.collectionTemplatePath) {
+      this.settings.collectionTemplatePath = file.path;
+      changed = true;
+    }
+    if (changed) {
+      await this.saveSettings();
+    }
   }
 
-  private async readCompanionTemplateOrNotify(): Promise<string | null | undefined> {
-    const path = this.settings.companionTemplatePath;
+  private async readNoteModelOrNotify(path: string, label: string): Promise<string | null | undefined> {
     if (path.length === 0) {
       return null;
     }
 
     const model = this.app.vault.getAbstractFileByPath(path);
     if (!(model instanceof TFile) || model.extension.toLowerCase() !== "md") {
-      console.error(`${LOG_PREFIX} Companion note model is unavailable: ${path}`);
-      new Notice(`Companion note model is unavailable: ${path}`);
+      console.error(`${LOG_PREFIX} ${label} is unavailable: ${path}`);
+      new Notice(`${label} is unavailable: ${path}`);
       return undefined;
     }
 
     try {
       return await this.app.vault.cachedRead(model);
     } catch (error) {
-      console.error(`${LOG_PREFIX} Could not read companion note model: ${path}`, error);
-      new Notice(`Could not read companion note model: ${path}`);
+      console.error(`${LOG_PREFIX} Could not read ${label.toLowerCase()}: ${path}`, error);
+      new Notice(`Could not read ${label.toLowerCase()}: ${path}`);
       return undefined;
     }
+  }
+
+  private readCompanionTemplateOrNotify(): Promise<string | null | undefined> {
+    return this.readNoteModelOrNotify(this.settings.companionTemplatePath, "Companion note model");
+  }
+
+  private readCollectionTemplateOrNotify(): Promise<string | null | undefined> {
+    return this.readNoteModelOrNotify(this.settings.collectionTemplatePath, "Collection note model");
   }
 
   private addSingleCompanionMenuItem(menu: Menu, file: TFile): void {
@@ -170,6 +188,43 @@ export default class MoveAttachmentsWithNotePlugin extends Plugin {
         .setIcon("files")
         .onClick(() => this.createCompanionBatch(files));
     });
+
+    if (files.filter(isEligibleFile).length >= 2) {
+      menu.addItem((item) => {
+        item
+          .setTitle("Create collection note from selected files")
+          .setIcon("notebook-tabs")
+          .onClick(() => this.createCollectionFromSelection(files));
+      });
+    }
+  }
+
+  private async createCollectionFromSelection(files: readonly TAbstractFile[]): Promise<void> {
+    const eligibleFiles = files.filter(isEligibleFile);
+    if (eligibleFiles.length < 2) {
+      new Notice("Select at least two non-Markdown files to create a collection note.");
+      return;
+    }
+
+    const modelContent = await this.readCollectionTemplateOrNotify();
+    if (modelContent === undefined) {
+      return;
+    }
+
+    const result = await createCollectionNote(this.app, eligibleFiles, modelContent);
+    if (result.kind === "error") {
+      console.error(`${LOG_PREFIX} Failed to create collection note`, result.error);
+      new Notice("Could not create a collection note for the selected files.");
+      return;
+    }
+
+    console.info(`${LOG_PREFIX} Collection note created: ${result.path} (${eligibleFiles.length} sources)`);
+    try {
+      await this.app.workspace.getLeaf(false).openFile(result.note);
+    } catch (error) {
+      console.error(`${LOG_PREFIX} Failed to open collection note ${result.path}`, error);
+      new Notice(`Collection note exists but could not be opened: ${result.path}`);
+    }
   }
 
   private async openOrCreateCompanion(file: TFile): Promise<void> {
@@ -344,6 +399,13 @@ export default class MoveAttachmentsWithNotePlugin extends Plugin {
             item.setIcon("files");
             item.onClick(() => this.createCompanionBatch(context.selection.files));
           });
+          if (context.selection.files.filter(isEligibleFile).length >= 2) {
+            context.addItem((item) => {
+              item.setTitle("Create collection note from selected files");
+              item.setIcon("notebook-tabs");
+              item.onClick(() => this.createCollectionFromSelection(context.selection.files));
+            });
+          }
         }
         return;
       }

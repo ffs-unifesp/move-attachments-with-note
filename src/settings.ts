@@ -12,10 +12,12 @@ import type MoveAttachmentsWithNotePlugin from "./main";
 
 export interface MoveAttachmentsWithNoteSettings {
   companionTemplatePath: string;
+  collectionTemplatePath: string;
 }
 
 export const DEFAULT_SETTINGS: MoveAttachmentsWithNoteSettings = {
-  companionTemplatePath: ""
+  companionTemplatePath: "",
+  collectionTemplatePath: ""
 };
 
 class MarkdownFileSuggest extends AbstractInputSuggest<TFile> {
@@ -63,6 +65,27 @@ export class MoveAttachmentsWithNoteSettingTab extends PluginSettingTab {
         new MarkdownFileSuggest(this.app, text, (file) => {
           text.setValue(file.path);
           this.owner.settings.companionTemplatePath = file.path;
+          void this.owner.saveSettings();
+        });
+      });
+
+    new Setting(containerEl)
+      .setName("Collection note model")
+      .setDesc("Choose any Markdown note in the vault to use as the model for notes created from multiple selected files. Leave blank to use the built-in minimal content.")
+      .addText((text) => {
+        text
+          .setPlaceholder("Path/to/model.md")
+          .setValue(this.owner.settings.collectionTemplatePath)
+          .onChange(async (value) => {
+            this.owner.settings.collectionTemplatePath = value.trim().length === 0
+              ? ""
+              : normalizePath(value.trim());
+            await this.owner.saveSettings();
+          });
+
+        new MarkdownFileSuggest(this.app, text, (file) => {
+          text.setValue(file.path);
+          this.owner.settings.collectionTemplatePath = file.path;
           void this.owner.saveSettings();
         });
       });

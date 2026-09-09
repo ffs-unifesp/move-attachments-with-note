@@ -38,6 +38,7 @@ source: "[[article.pdf]]"
 
 - Right-click one non-Markdown file in the File Explorer and choose **Open or create companion note**.
 - Select multiple File Explorer items and choose **Create companion notes**. Markdown files and folders are ignored, and a summary is shown when processing finishes.
+- Select two or more non-Markdown files and choose **Create collection note from selected files** to create one Markdown note containing all selected sources.
 - Run **Open or create companion note for active file** from the Command Palette to use the active non-Markdown file. No default hotkey is assigned.
 - When Notebook Navigator 2.0.0 or newer is installed and enabled, the same single-file and multi-file actions appear in its file menus after Obsidian loads.
 - Companion notes are created next to their source files and are never allowed to overwrite an existing note.
@@ -50,6 +51,12 @@ source: "[[article.pdf]]"
 In the plugin settings, **Companion note model** can point to any Markdown note in the vault. New companion notes copy that note's properties and body, while the plugin always replaces `source` with the canonical link to the source file.
 
 The model supports `{{title}}`, `{{date}}`, `{{date:FORMAT}}`, `{{time}}`, `{{time:FORMAT}}`, `{{source}}`, and `{{embed}}`. If `{{embed}}` is absent, the source embed is appended to the end. When no model is selected, the built-in minimal content is used. If the selected model is unavailable, creation stops with a notice.
+
+### Collection notes
+
+A collection note is created in the deepest folder shared by all selected files and receives a collision-safe name such as `2026-09-09 17.30 Collection.md`. Its `sources` property contains one wikilink per selected file. All files are embedded in the body.
+
+The optional **Collection note model** supports the standard date, time, and title placeholders plus `{{sources}}` and `{{embeds}}`. If `{{embeds}}` is absent, all embeds are appended to the end. Any singular `source` property inherited from the model is removed so the collection is not mistaken for a one-to-one companion note.
 
 ## Logs
 

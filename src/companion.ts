@@ -69,6 +69,64 @@ function setCanonicalSource(frontmatter: string, sourceLink: string): string {
   return lines.join("\n");
 }
 
+function removeTopLevelProperty(frontmatter: string, property: string): string {
+  const lines = frontmatter.split(/\r?\n/);
+  const propertyPattern = new RegExp(`^(?:${property}|["']${property}["'])\\s*:`);
+  const propertyIndex = lines.findIndex((line) => propertyPattern.test(line));
+  if (propertyIndex === -1) {
+    return frontmatter;
+  }
+
+  let endIndex = propertyIndex + 1;
+  while (endIndex < lines.length && (/^\s/.test(lines[endIndex]) || lines[endIndex].trim() === "")) {
+    endIndex += 1;
+  }
+  lines.splice(propertyIndex, endIndex - propertyIndex);
+  return lines.join("\n");
+}
+
+function setCanonicalSources(frontmatter: string, sourceLinks: readonly string[]): string {
+  const withoutSingular = removeTopLevelProperty(frontmatter, "source");
+  const withoutExisting = removeTopLevelProperty(withoutSingular, "sources").trimEnd();
+  const sourcesBlock = [
+    "sources:",
+    ...sourceLinks.map((sourceLink) => `  - ${JSON.stringify(sourceLink)}`)
+  ].join("\n");
+  return withoutExisting.length === 0 ? sourcesBlock : `${withoutExisting}\n${sourcesBlock}`;
+}
+
+function expandStandardPlaceholders(
+  content: string,
+  title: string,
+  now: number | Date
+): string {
+  const timestamp = moment(now);
+  return content
+    .replace(/\{\{date(?::([^}]+))?\}\}/g, (_match, format: string | undefined) =>
+      timestamp.format(format ?? "YYYY-MM-DD")
+    )
+    .replace(/\{\{time(?::([^}]+))?\}\}/g, (_match, format: string | undefined) =>
+      timestamp.format(format ?? "HH:mm")
+    )
+    .replace(/\{\{title\}\}/g, () => title);
+}
+
+function splitModelContent(content: string): { frontmatter: string; body: string } {
+  const frontmatterMatch = content.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
+  if (frontmatterMatch == null) {
+    return { frontmatter: "", body: content };
+  }
+
+  const parsed = parseYaml(frontmatterMatch[1]);
+  if (parsed != null && (typeof parsed !== "object" || Array.isArray(parsed))) {
+    throw new Error("Note model frontmatter must be a YAML mapping");
+  }
+  return {
+    frontmatter: frontmatterMatch[1],
+    body: content.slice(frontmatterMatch[0].length)
+  };
+}
+
 export function buildCompanionContentFromModel(
   modelContent: string,
   linktext: string,
@@ -78,15 +136,7 @@ export function buildCompanionContentFromModel(
   const sourceLink = `[[${linktext}]]`;
   const embed = `![[${linktext}]]`;
   const hadEmbedPlaceholder = modelContent.includes("{{embed}}");
-  const timestamp = moment(now);
-  let content = modelContent
-    .replace(/\{\{date(?::([^}]+))?\}\}/g, (_match, format: string | undefined) =>
-      timestamp.format(format ?? "YYYY-MM-DD")
-    )
-    .replace(/\{\{time(?::([^}]+))?\}\}/g, (_match, format: string | undefined) =>
-      timestamp.format(format ?? "HH:mm")
-    )
-    .replace(/\{\{title\}\}/g, () => title)
+  let content = expandStandardPlaceholders(modelContent, title, now)
     .replace(/\{\{source\}\}/g, () => sourceLink)
     .replace(/\{\{embed\}\}/g, () => embed);
 
@@ -96,15 +146,118 @@ export function buildCompanionContentFromModel(
     content += "\n";
   }
 
-  const frontmatterMatch = content.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
-  let frontmatter = "";
-  let body = content;
-  if (frontmatterMatch != null) {
-    frontmatter = frontmatterMatch[1];
-    body = content.slice(frontmatterMatch[0].length);
-  }
+  const { frontmatter, body } = splitModelContent(content);
 
   return `---\n${setCanonicalSource(frontmatter, sourceLink)}\n---\n${body}`;
+}
+
+export function getCommonDirectory(files: readonly TFile[]): string {
+  if (files.length === 0) {
+    return "";
+  }
+
+  const directories = files.map((file) => getDirectory(file.path).split("/").filter(Boolean));
+  const common: string[] = [];
+  for (let index = 0; index < directories[0].length; index += 1) {
+    const segment = directories[0][index];
+    if (directories.every((directory) => directory[index] === segment)) {
+      common.push(segment);
+    } else {
+      break;
+    }
+  }
+  return common.join("/");
+}
+
+export function findAvailableCollectionPath(
+  app: App,
+  sourceFiles: readonly TFile[],
+  now: number | Date = Date.now()
+): string | null {
+  const directory = getCommonDirectory(sourceFiles);
+  const fileName = `${moment(now).format("YYYY-MM-DD HH.mm")} Collection.md`;
+  const primaryPath = buildPath(directory, fileName);
+  if (app.vault.getAbstractFileByPath(primaryPath) == null) {
+    return primaryPath;
+  }
+
+  for (let suffix = 1; suffix <= MAX_SUFFIX_ATTEMPTS; suffix += 1) {
+    const candidatePath = buildPath(directory, buildNumberedName(fileName, suffix));
+    if (app.vault.getAbstractFileByPath(candidatePath) == null) {
+      return candidatePath;
+    }
+  }
+  return null;
+}
+
+export function buildCollectionContent(
+  linktexts: readonly string[],
+  modelContent: string | null,
+  title: string,
+  now: number | Date = Date.now()
+): string {
+  const sourceLinks = linktexts.map((linktext) => `[[${linktext}]]`);
+  const embeds = linktexts.map((linktext) => `![[${linktext}]]`).join("\n");
+  if (modelContent == null) {
+    return `---\n${setCanonicalSources("", sourceLinks)}\n---\n${embeds}\n`;
+  }
+
+  const hadEmbedsPlaceholder = modelContent.includes("{{embeds}}");
+  let content = expandStandardPlaceholders(modelContent, title, now)
+    .replace(/\{\{sources\}\}/g, () => sourceLinks.map((link) => `- ${link}`).join("\n"))
+    .replace(/\{\{embeds\}\}/g, () => embeds);
+  if (!hadEmbedsPlaceholder) {
+    content = `${content.trimEnd()}${content.trim().length > 0 ? "\n" : ""}${embeds}\n`;
+  } else if (!content.endsWith("\n")) {
+    content += "\n";
+  }
+
+  const { frontmatter, body } = splitModelContent(content);
+  return `---\n${setCanonicalSources(frontmatter, sourceLinks)}\n---\n${body}`;
+}
+
+export type CreateCollectionResult =
+  | { kind: "created"; note: TFile; path: string }
+  | { kind: "error"; error: unknown };
+
+export async function createCollectionNote(
+  app: App,
+  sourceFiles: readonly TFile[],
+  modelContent: string | null = null,
+  now: number | Date = Date.now()
+): Promise<CreateCollectionResult> {
+  const currentFiles: TFile[] = [];
+  for (const sourceFile of sourceFiles) {
+    const current = app.vault.getAbstractFileByPath(sourceFile.path);
+    if (!isEligibleFile(current)) {
+      return { kind: "error", error: new Error(`Source file is no longer available: ${sourceFile.path}`) };
+    }
+    currentFiles.push(current);
+  }
+  if (currentFiles.length < 2) {
+    return { kind: "error", error: new Error("A collection note requires at least two source files") };
+  }
+
+  const targetPath = findAvailableCollectionPath(app, currentFiles, now);
+  if (targetPath == null) {
+    return { kind: "error", error: new Error("Could not allocate a collection note name") };
+  }
+
+  const linktexts = currentFiles.map((file) => app.metadataCache.fileToLinktext(file, targetPath, false));
+  const targetFileName = targetPath.slice(targetPath.lastIndexOf("/") + 1);
+  let content: string;
+  try {
+    content = buildCollectionContent(linktexts, modelContent, targetFileName.slice(0, -3), now);
+  } catch (error) {
+    return { kind: "error", error };
+  }
+
+  try {
+    const note = await app.vault.create(targetPath, content);
+    return { kind: "created", note, path: targetPath };
+  } catch (error) {
+    return { kind: "error", error };
+  }
 }
 
 export function findAvailableCompanionPath(

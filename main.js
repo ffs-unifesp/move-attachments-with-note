@@ -79,35 +79,156 @@ function setCanonicalSource(frontmatter, sourceLink) {
   lines.splice(sourceIndex, endIndex - sourceIndex, sourceLine);
   return lines.join("\n");
 }
-function buildCompanionContentFromModel(modelContent, linktext, title, now = Date.now()) {
-  const sourceLink = `[[${linktext}]]`;
-  const embed = `![[${linktext}]]`;
-  const hadEmbedPlaceholder = modelContent.includes("{{embed}}");
+function removeTopLevelProperty(frontmatter, property) {
+  const lines = frontmatter.split(/\r?\n/);
+  const propertyPattern = new RegExp(`^(?:${property}|["']${property}["'])\\s*:`);
+  const propertyIndex = lines.findIndex((line) => propertyPattern.test(line));
+  if (propertyIndex === -1) {
+    return frontmatter;
+  }
+  let endIndex = propertyIndex + 1;
+  while (endIndex < lines.length && (/^\s/.test(lines[endIndex]) || lines[endIndex].trim() === "")) {
+    endIndex += 1;
+  }
+  lines.splice(propertyIndex, endIndex - propertyIndex);
+  return lines.join("\n");
+}
+function setCanonicalSources(frontmatter, sourceLinks) {
+  const withoutSingular = removeTopLevelProperty(frontmatter, "source");
+  const withoutExisting = removeTopLevelProperty(withoutSingular, "sources").trimEnd();
+  const sourcesBlock = [
+    "sources:",
+    ...sourceLinks.map((sourceLink) => `  - ${JSON.stringify(sourceLink)}`)
+  ].join("\n");
+  return withoutExisting.length === 0 ? sourcesBlock : `${withoutExisting}
+${sourcesBlock}`;
+}
+function expandStandardPlaceholders(content, title, now) {
   const timestamp = (0, import_obsidian.moment)(now);
-  let content = modelContent.replace(
+  return content.replace(
     /\{\{date(?::([^}]+))?\}\}/g,
     (_match, format) => timestamp.format(format ?? "YYYY-MM-DD")
   ).replace(
     /\{\{time(?::([^}]+))?\}\}/g,
     (_match, format) => timestamp.format(format ?? "HH:mm")
-  ).replace(/\{\{title\}\}/g, () => title).replace(/\{\{source\}\}/g, () => sourceLink).replace(/\{\{embed\}\}/g, () => embed);
+  ).replace(/\{\{title\}\}/g, () => title);
+}
+function splitModelContent(content) {
+  const frontmatterMatch = content.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
+  if (frontmatterMatch == null) {
+    return { frontmatter: "", body: content };
+  }
+  const parsed = (0, import_obsidian.parseYaml)(frontmatterMatch[1]);
+  if (parsed != null && (typeof parsed !== "object" || Array.isArray(parsed))) {
+    throw new Error("Note model frontmatter must be a YAML mapping");
+  }
+  return {
+    frontmatter: frontmatterMatch[1],
+    body: content.slice(frontmatterMatch[0].length)
+  };
+}
+function buildCompanionContentFromModel(modelContent, linktext, title, now = Date.now()) {
+  const sourceLink = `[[${linktext}]]`;
+  const embed = `![[${linktext}]]`;
+  const hadEmbedPlaceholder = modelContent.includes("{{embed}}");
+  let content = expandStandardPlaceholders(modelContent, title, now).replace(/\{\{source\}\}/g, () => sourceLink).replace(/\{\{embed\}\}/g, () => embed);
   if (!hadEmbedPlaceholder) {
     content = `${content.trimEnd()}${content.trim().length > 0 ? "\n" : ""}${embed}
 `;
   } else if (!content.endsWith("\n")) {
     content += "\n";
   }
-  const frontmatterMatch = content.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
-  let frontmatter = "";
-  let body = content;
-  if (frontmatterMatch != null) {
-    frontmatter = frontmatterMatch[1];
-    body = content.slice(frontmatterMatch[0].length);
-  }
+  const { frontmatter, body } = splitModelContent(content);
   return `---
 ${setCanonicalSource(frontmatter, sourceLink)}
 ---
 ${body}`;
+}
+function getCommonDirectory(files) {
+  if (files.length === 0) {
+    return "";
+  }
+  const directories = files.map((file) => getDirectory(file.path).split("/").filter(Boolean));
+  const common = [];
+  for (let index = 0; index < directories[0].length; index += 1) {
+    const segment = directories[0][index];
+    if (directories.every((directory) => directory[index] === segment)) {
+      common.push(segment);
+    } else {
+      break;
+    }
+  }
+  return common.join("/");
+}
+function findAvailableCollectionPath(app, sourceFiles, now = Date.now()) {
+  const directory = getCommonDirectory(sourceFiles);
+  const fileName = `${(0, import_obsidian.moment)(now).format("YYYY-MM-DD HH.mm")} Collection.md`;
+  const primaryPath = buildPath(directory, fileName);
+  if (app.vault.getAbstractFileByPath(primaryPath) == null) {
+    return primaryPath;
+  }
+  for (let suffix = 1; suffix <= MAX_SUFFIX_ATTEMPTS; suffix += 1) {
+    const candidatePath = buildPath(directory, buildNumberedName(fileName, suffix));
+    if (app.vault.getAbstractFileByPath(candidatePath) == null) {
+      return candidatePath;
+    }
+  }
+  return null;
+}
+function buildCollectionContent(linktexts, modelContent, title, now = Date.now()) {
+  const sourceLinks = linktexts.map((linktext) => `[[${linktext}]]`);
+  const embeds = linktexts.map((linktext) => `![[${linktext}]]`).join("\n");
+  if (modelContent == null) {
+    return `---
+${setCanonicalSources("", sourceLinks)}
+---
+${embeds}
+`;
+  }
+  const hadEmbedsPlaceholder = modelContent.includes("{{embeds}}");
+  let content = expandStandardPlaceholders(modelContent, title, now).replace(/\{\{sources\}\}/g, () => sourceLinks.map((link) => `- ${link}`).join("\n")).replace(/\{\{embeds\}\}/g, () => embeds);
+  if (!hadEmbedsPlaceholder) {
+    content = `${content.trimEnd()}${content.trim().length > 0 ? "\n" : ""}${embeds}
+`;
+  } else if (!content.endsWith("\n")) {
+    content += "\n";
+  }
+  const { frontmatter, body } = splitModelContent(content);
+  return `---
+${setCanonicalSources(frontmatter, sourceLinks)}
+---
+${body}`;
+}
+async function createCollectionNote(app, sourceFiles, modelContent = null, now = Date.now()) {
+  const currentFiles = [];
+  for (const sourceFile of sourceFiles) {
+    const current = app.vault.getAbstractFileByPath(sourceFile.path);
+    if (!isEligibleFile(current)) {
+      return { kind: "error", error: new Error(`Source file is no longer available: ${sourceFile.path}`) };
+    }
+    currentFiles.push(current);
+  }
+  if (currentFiles.length < 2) {
+    return { kind: "error", error: new Error("A collection note requires at least two source files") };
+  }
+  const targetPath = findAvailableCollectionPath(app, currentFiles, now);
+  if (targetPath == null) {
+    return { kind: "error", error: new Error("Could not allocate a collection note name") };
+  }
+  const linktexts = currentFiles.map((file) => app.metadataCache.fileToLinktext(file, targetPath, false));
+  const targetFileName = targetPath.slice(targetPath.lastIndexOf("/") + 1);
+  let content;
+  try {
+    content = buildCollectionContent(linktexts, modelContent, targetFileName.slice(0, -3), now);
+  } catch (error) {
+    return { kind: "error", error };
+  }
+  try {
+    const note = await app.vault.create(targetPath, content);
+    return { kind: "created", note, path: targetPath };
+  } catch (error) {
+    return { kind: "error", error };
+  }
 }
 function findAvailableCompanionPath(app, sourceFile) {
   const directory = getDirectory(sourceFile.path);
@@ -214,7 +335,8 @@ async function createCompanionIfNeeded(app, sourceFile, index, modelContent = nu
 // src/settings.ts
 var import_obsidian2 = require("obsidian");
 var DEFAULT_SETTINGS = {
-  companionTemplatePath: ""
+  companionTemplatePath: "",
+  collectionTemplatePath: ""
 };
 var MarkdownFileSuggest = class extends import_obsidian2.AbstractInputSuggest {
   constructor(app, input, onChoose) {
@@ -245,6 +367,17 @@ var MoveAttachmentsWithNoteSettingTab = class extends import_obsidian2.PluginSet
       new MarkdownFileSuggest(this.app, text, (file) => {
         text.setValue(file.path);
         this.owner.settings.companionTemplatePath = file.path;
+        void this.owner.saveSettings();
+      });
+    });
+    new import_obsidian2.Setting(containerEl).setName("Collection note model").setDesc("Choose any Markdown note in the vault to use as the model for notes created from multiple selected files. Leave blank to use the built-in minimal content.").addText((text) => {
+      text.setPlaceholder("Path/to/model.md").setValue(this.owner.settings.collectionTemplatePath).onChange(async (value) => {
+        this.owner.settings.collectionTemplatePath = value.trim().length === 0 ? "" : (0, import_obsidian2.normalizePath)(value.trim());
+        await this.owner.saveSettings();
+      });
+      new MarkdownFileSuggest(this.app, text, (file) => {
+        text.setValue(file.path);
+        this.owner.settings.collectionTemplatePath = file.path;
         void this.owner.saveSettings();
       });
     });
@@ -323,30 +456,45 @@ var MoveAttachmentsWithNotePlugin = class extends import_obsidian3.Plugin {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
   }
   async handleTemplateRename(file, oldPath) {
-    if (oldPath !== this.settings.companionTemplatePath || !(file instanceof import_obsidian3.TFile)) {
+    if (!(file instanceof import_obsidian3.TFile)) {
       return;
     }
-    this.settings.companionTemplatePath = file.path;
-    await this.saveSettings();
+    let changed = false;
+    if (oldPath === this.settings.companionTemplatePath) {
+      this.settings.companionTemplatePath = file.path;
+      changed = true;
+    }
+    if (oldPath === this.settings.collectionTemplatePath) {
+      this.settings.collectionTemplatePath = file.path;
+      changed = true;
+    }
+    if (changed) {
+      await this.saveSettings();
+    }
   }
-  async readCompanionTemplateOrNotify() {
-    const path = this.settings.companionTemplatePath;
+  async readNoteModelOrNotify(path, label) {
     if (path.length === 0) {
       return null;
     }
     const model = this.app.vault.getAbstractFileByPath(path);
     if (!(model instanceof import_obsidian3.TFile) || model.extension.toLowerCase() !== "md") {
-      console.error(`${LOG_PREFIX} Companion note model is unavailable: ${path}`);
-      new import_obsidian3.Notice(`Companion note model is unavailable: ${path}`);
+      console.error(`${LOG_PREFIX} ${label} is unavailable: ${path}`);
+      new import_obsidian3.Notice(`${label} is unavailable: ${path}`);
       return void 0;
     }
     try {
       return await this.app.vault.cachedRead(model);
     } catch (error) {
-      console.error(`${LOG_PREFIX} Could not read companion note model: ${path}`, error);
-      new import_obsidian3.Notice(`Could not read companion note model: ${path}`);
+      console.error(`${LOG_PREFIX} Could not read ${label.toLowerCase()}: ${path}`, error);
+      new import_obsidian3.Notice(`Could not read ${label.toLowerCase()}: ${path}`);
       return void 0;
     }
+  }
+  readCompanionTemplateOrNotify() {
+    return this.readNoteModelOrNotify(this.settings.companionTemplatePath, "Companion note model");
+  }
+  readCollectionTemplateOrNotify() {
+    return this.readNoteModelOrNotify(this.settings.collectionTemplatePath, "Collection note model");
   }
   addSingleCompanionMenuItem(menu, file) {
     menu.addItem((item) => {
@@ -357,6 +505,35 @@ var MoveAttachmentsWithNotePlugin = class extends import_obsidian3.Plugin {
     menu.addItem((item) => {
       item.setTitle("Create companion notes").setIcon("files").onClick(() => this.createCompanionBatch(files));
     });
+    if (files.filter(isEligibleFile).length >= 2) {
+      menu.addItem((item) => {
+        item.setTitle("Create collection note from selected files").setIcon("notebook-tabs").onClick(() => this.createCollectionFromSelection(files));
+      });
+    }
+  }
+  async createCollectionFromSelection(files) {
+    const eligibleFiles = files.filter(isEligibleFile);
+    if (eligibleFiles.length < 2) {
+      new import_obsidian3.Notice("Select at least two non-Markdown files to create a collection note.");
+      return;
+    }
+    const modelContent = await this.readCollectionTemplateOrNotify();
+    if (modelContent === void 0) {
+      return;
+    }
+    const result = await createCollectionNote(this.app, eligibleFiles, modelContent);
+    if (result.kind === "error") {
+      console.error(`${LOG_PREFIX} Failed to create collection note`, result.error);
+      new import_obsidian3.Notice("Could not create a collection note for the selected files.");
+      return;
+    }
+    console.info(`${LOG_PREFIX} Collection note created: ${result.path} (${eligibleFiles.length} sources)`);
+    try {
+      await this.app.workspace.getLeaf(false).openFile(result.note);
+    } catch (error) {
+      console.error(`${LOG_PREFIX} Failed to open collection note ${result.path}`, error);
+      new import_obsidian3.Notice(`Collection note exists but could not be opened: ${result.path}`);
+    }
   }
   async openOrCreateCompanion(file) {
     const index = this.getCompanionIndexOrNotify();
@@ -506,6 +683,13 @@ var MoveAttachmentsWithNotePlugin = class extends import_obsidian3.Plugin {
             item.setIcon("files");
             item.onClick(() => this.createCompanionBatch(context.selection.files));
           });
+          if (context.selection.files.filter(isEligibleFile).length >= 2) {
+            context.addItem((item) => {
+              item.setTitle("Create collection note from selected files");
+              item.setIcon("notebook-tabs");
+              item.onClick(() => this.createCollectionFromSelection(context.selection.files));
+            });
+          }
         }
         return;
       }
