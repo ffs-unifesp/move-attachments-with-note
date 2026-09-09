@@ -201,4 +201,18 @@ describe("Move Attachments With Note", () => {
     expect(filesByPath.has("QA/T10/B/image a-tilde ã.png")).toBe(true);
     expect(filesByPath.has("QA/T10/B/report e-acute é.pdf")).toBe(true);
   });
+
+  it("T11: moving a companion note moves its source file once", async () => {
+    const { plugin, fileManager, filesByPath } = setupPlugin({
+      files: ["QA/T11/A/photo.jpg"],
+      resolvedLinks: {
+        "QA/T11/B/photo.md": { "QA/T11/A/photo.jpg": 2 }
+      }
+    });
+
+    await runRename(plugin, "QA/T11/B/photo.md", "QA/T11/A/photo.md");
+
+    expect(fileManager.renameFile).toHaveBeenCalledTimes(1);
+    expect(filesByPath.has("QA/T11/B/photo.jpg")).toBe(true);
+  });
 });

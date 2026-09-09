@@ -24,13 +24,11 @@ __export(main_exports, {
   default: () => MoveAttachmentsWithNotePlugin
 });
 module.exports = __toCommonJS(main_exports);
+var import_obsidian3 = require("obsidian");
+
+// src/companion.ts
 var import_obsidian = require("obsidian");
-var LOG_PREFIX = "[move-attachments-with-note]";
-var LINK_CACHE_DELAY_MS = 150;
 var MAX_SUFFIX_ATTEMPTS = 1e4;
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 function getDirectory(path) {
   const normalized = (0, import_obsidian.normalizePath)(path);
   const splitIndex = normalized.lastIndexOf("/");
@@ -48,20 +46,484 @@ function buildNumberedName(fileName, suffix) {
   const ext = fileName.slice(extIndex);
   return `${base}-${suffix}${ext}`;
 }
-var MoveAttachmentsWithNotePlugin = class extends import_obsidian.Plugin {
+function isEligibleFile(file) {
+  return file instanceof import_obsidian.TFile && file.extension.toLowerCase() !== "md";
+}
+function buildCompanionContent(linktext) {
+  const source = JSON.stringify(`[[${linktext}]]`);
+  return `---
+source: ${source}
+---
+![[${linktext}]]
+`;
+}
+function setCanonicalSource(frontmatter, sourceLink) {
+  const parsed = (0, import_obsidian.parseYaml)(frontmatter);
+  if (parsed != null && (typeof parsed !== "object" || Array.isArray(parsed))) {
+    throw new Error("Companion note model frontmatter must be a YAML mapping");
+  }
+  const sourceLine = `source: ${JSON.stringify(sourceLink)}`;
+  const lines = frontmatter.split(/\r?\n/);
+  const sourceIndex = lines.findIndex((line) => /^(?:source|["']source["'])\s*:/.test(line));
+  if (sourceIndex === -1) {
+    while (lines[lines.length - 1] === "") {
+      lines.pop();
+    }
+    lines.push(sourceLine);
+    return lines.join("\n");
+  }
+  let endIndex = sourceIndex + 1;
+  while (endIndex < lines.length && (/^\s/.test(lines[endIndex]) || lines[endIndex].trim() === "")) {
+    endIndex += 1;
+  }
+  lines.splice(sourceIndex, endIndex - sourceIndex, sourceLine);
+  return lines.join("\n");
+}
+function buildCompanionContentFromModel(modelContent, linktext, title, now = Date.now()) {
+  const sourceLink = `[[${linktext}]]`;
+  const embed = `![[${linktext}]]`;
+  const hadEmbedPlaceholder = modelContent.includes("{{embed}}");
+  const timestamp = (0, import_obsidian.moment)(now);
+  let content = modelContent.replace(
+    /\{\{date(?::([^}]+))?\}\}/g,
+    (_match, format) => timestamp.format(format ?? "YYYY-MM-DD")
+  ).replace(
+    /\{\{time(?::([^}]+))?\}\}/g,
+    (_match, format) => timestamp.format(format ?? "HH:mm")
+  ).replace(/\{\{title\}\}/g, () => title).replace(/\{\{source\}\}/g, () => sourceLink).replace(/\{\{embed\}\}/g, () => embed);
+  if (!hadEmbedPlaceholder) {
+    content = `${content.trimEnd()}${content.trim().length > 0 ? "\n" : ""}${embed}
+`;
+  } else if (!content.endsWith("\n")) {
+    content += "\n";
+  }
+  const frontmatterMatch = content.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
+  let frontmatter = "";
+  let body = content;
+  if (frontmatterMatch != null) {
+    frontmatter = frontmatterMatch[1];
+    body = content.slice(frontmatterMatch[0].length);
+  }
+  return `---
+${setCanonicalSource(frontmatter, sourceLink)}
+---
+${body}`;
+}
+function findAvailableCompanionPath(app, sourceFile) {
+  const directory = getDirectory(sourceFile.path);
+  const primaryPath = buildPath(directory, `${sourceFile.basename}.md`);
+  if (app.vault.getAbstractFileByPath(primaryPath) == null) {
+    return { path: primaryPath, conflictResolved: false };
+  }
+  const token = sourceFile.extension.length > 0 ? sourceFile.extension : "file";
+  const fallbackStem = `${sourceFile.basename} - ${token}`;
+  const fallbackPath = buildPath(directory, `${fallbackStem}.md`);
+  if (app.vault.getAbstractFileByPath(fallbackPath) == null) {
+    return { path: fallbackPath, conflictResolved: true };
+  }
+  for (let suffix = 1; suffix <= MAX_SUFFIX_ATTEMPTS; suffix += 1) {
+    const candidatePath = buildPath(directory, `${fallbackStem}-${suffix}.md`);
+    if (app.vault.getAbstractFileByPath(candidatePath) == null) {
+      return { path: candidatePath, conflictResolved: true };
+    }
+  }
+  return null;
+}
+function getCanonicalSourceLink(cache) {
+  if (typeof cache.frontmatter?.source !== "string") {
+    return null;
+  }
+  const value = cache.frontmatter.source.trim();
+  if (!/^\[\[[^\]]+\]\]$/.test(value)) {
+    return null;
+  }
+  const sourceLinks = (cache.frontmatterLinks ?? []).filter((link) => link.key === "source");
+  return sourceLinks.length === 1 ? sourceLinks[0].link : null;
+}
+function buildCompanionIndex(app) {
+  const bySourcePath = /* @__PURE__ */ new Map();
+  const missingMetadata = [];
+  for (const note of app.vault.getMarkdownFiles()) {
+    const cache = app.metadataCache.getFileCache(note);
+    if (cache == null) {
+      missingMetadata.push(note.path);
+      continue;
+    }
+    const sourceLink = getCanonicalSourceLink(cache);
+    if (sourceLink == null) {
+      continue;
+    }
+    const sourceFile = app.metadataCache.getFirstLinkpathDest(sourceLink, note.path);
+    if (!isEligibleFile(sourceFile)) {
+      continue;
+    }
+    const companions = bySourcePath.get(sourceFile.path) ?? [];
+    companions.push(note);
+    bySourcePath.set(sourceFile.path, companions);
+  }
+  return { bySourcePath, missingMetadata };
+}
+async function createCompanionIfNeeded(app, sourceFile, index, modelContent = null, now = Date.now()) {
+  const existing = index.bySourcePath.get(sourceFile.path) ?? [];
+  if (existing.length > 1) {
+    return { kind: "ambiguous", notes: existing };
+  }
+  if (existing.length === 1) {
+    return { kind: "alreadyExisting", note: existing[0] };
+  }
+  const currentFile = app.vault.getAbstractFileByPath(sourceFile.path);
+  if (!isEligibleFile(currentFile)) {
+    return { kind: "error", error: new Error(`Source file is no longer available: ${sourceFile.path}`) };
+  }
+  const target = findAvailableCompanionPath(app, currentFile);
+  if (target == null) {
+    return {
+      kind: "error",
+      error: new Error(
+        `Could not allocate a companion name after ${MAX_SUFFIX_ATTEMPTS} numbered attempts`
+      )
+    };
+  }
+  const linktext = app.metadataCache.fileToLinktext(currentFile, target.path, false);
+  let content;
+  try {
+    const targetFileName = target.path.slice(target.path.lastIndexOf("/") + 1);
+    content = modelContent == null ? buildCompanionContent(linktext) : buildCompanionContentFromModel(
+      modelContent,
+      linktext,
+      targetFileName.slice(0, -3),
+      now
+    );
+  } catch (error) {
+    return { kind: "error", error };
+  }
+  try {
+    const note = await app.vault.create(target.path, content);
+    index.bySourcePath.set(currentFile.path, [note]);
+    return {
+      kind: "created",
+      note,
+      path: target.path,
+      conflictResolved: target.conflictResolved
+    };
+  } catch (error) {
+    return { kind: "error", error };
+  }
+}
+
+// src/settings.ts
+var import_obsidian2 = require("obsidian");
+var DEFAULT_SETTINGS = {
+  companionTemplatePath: ""
+};
+var MarkdownFileSuggest = class extends import_obsidian2.AbstractInputSuggest {
+  constructor(app, input, onChoose) {
+    super(app, input.inputEl);
+    this.onSelect(onChoose);
+  }
+  getSuggestions(query) {
+    const normalizedQuery = query.trim().toLowerCase();
+    return this.app.vault.getMarkdownFiles().filter((file) => normalizedQuery.length === 0 || file.path.toLowerCase().includes(normalizedQuery)).slice(0, 100);
+  }
+  renderSuggestion(file, el) {
+    el.setText(file.path);
+  }
+};
+var MoveAttachmentsWithNoteSettingTab = class extends import_obsidian2.PluginSettingTab {
+  constructor(app, owner) {
+    super(app, owner);
+    this.owner = owner;
+  }
+  display() {
+    const { containerEl } = this;
+    containerEl.empty();
+    new import_obsidian2.Setting(containerEl).setName("Companion note model").setDesc("Choose any Markdown note in the vault to use as the model for new companion notes. Leave blank to use the built-in minimal content.").addText((text) => {
+      text.setPlaceholder("Path/to/model.md").setValue(this.owner.settings.companionTemplatePath).onChange(async (value) => {
+        this.owner.settings.companionTemplatePath = value.trim().length === 0 ? "" : (0, import_obsidian2.normalizePath)(value.trim());
+        await this.owner.saveSettings();
+      });
+      new MarkdownFileSuggest(this.app, text, (file) => {
+        text.setValue(file.path);
+        this.owner.settings.companionTemplatePath = file.path;
+        void this.owner.saveSettings();
+      });
+    });
+  }
+};
+
+// src/main.ts
+var LOG_PREFIX = "[move-attachments-with-note]";
+var LINK_CACHE_DELAY_MS = 150;
+var FILE_EXPLORER_MENU_SOURCE = "file-explorer-context-menu";
+var NOTEBOOK_NAVIGATOR_PLUGIN_ID = "notebook-navigator";
+var NOTEBOOK_NAVIGATOR_RETRY_INTERVAL_MS = 250;
+var NOTEBOOK_NAVIGATOR_MAX_RETRIES = 40;
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+var MoveAttachmentsWithNotePlugin = class extends import_obsidian3.Plugin {
+  constructor() {
+    super(...arguments);
+    this.settings = { ...DEFAULT_SETTINGS };
+    this.notebookNavigatorMenusRegistered = false;
+    this.notebookNavigatorRegistrationTimer = null;
+  }
   async onload() {
     console.info(`${LOG_PREFIX} loaded`);
+    await this.loadSettings();
+    this.addSettingTab(new MoveAttachmentsWithNoteSettingTab(this.app, this));
     this.registerEvent(
       this.app.vault.on("rename", (file, oldPath) => {
         void this.handleRename(file, oldPath);
+        void this.handleTemplateRename(file, oldPath);
       })
     );
+    this.registerEvent(
+      this.app.workspace.on("file-menu", (menu, file, source) => {
+        if (source === FILE_EXPLORER_MENU_SOURCE && isEligibleFile(file)) {
+          this.addSingleCompanionMenuItem(menu, file);
+        }
+      })
+    );
+    this.registerEvent(
+      this.app.workspace.on("files-menu", (menu, files) => {
+        if (files.length >= 2 && files.some(isEligibleFile)) {
+          this.addBatchCompanionMenuItem(menu, files);
+        }
+      })
+    );
+    this.addCommand({
+      id: "open-or-create-companion-note-for-active-file",
+      name: "Open or create companion note for active file",
+      checkCallback: (checking) => {
+        const file = this.app.workspace.getActiveFile();
+        const available = isEligibleFile(file);
+        if (available && !checking) {
+          void this.openOrCreateCompanion(file);
+        }
+        return available;
+      }
+    });
+    this.app.workspace.onLayoutReady(() => {
+      this.startNotebookNavigatorRegistration();
+    });
+    this.register(() => {
+      if (this.notebookNavigatorRegistrationTimer != null) {
+        clearTimeout(this.notebookNavigatorRegistrationTimer);
+      }
+    });
   }
   onunload() {
     console.info(`${LOG_PREFIX} unloaded`);
   }
+  async saveSettings() {
+    await this.saveData(this.settings);
+  }
+  async loadSettings() {
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+  }
+  async handleTemplateRename(file, oldPath) {
+    if (oldPath !== this.settings.companionTemplatePath || !(file instanceof import_obsidian3.TFile)) {
+      return;
+    }
+    this.settings.companionTemplatePath = file.path;
+    await this.saveSettings();
+  }
+  async readCompanionTemplateOrNotify() {
+    const path = this.settings.companionTemplatePath;
+    if (path.length === 0) {
+      return null;
+    }
+    const model = this.app.vault.getAbstractFileByPath(path);
+    if (!(model instanceof import_obsidian3.TFile) || model.extension.toLowerCase() !== "md") {
+      console.error(`${LOG_PREFIX} Companion note model is unavailable: ${path}`);
+      new import_obsidian3.Notice(`Companion note model is unavailable: ${path}`);
+      return void 0;
+    }
+    try {
+      return await this.app.vault.cachedRead(model);
+    } catch (error) {
+      console.error(`${LOG_PREFIX} Could not read companion note model: ${path}`, error);
+      new import_obsidian3.Notice(`Could not read companion note model: ${path}`);
+      return void 0;
+    }
+  }
+  addSingleCompanionMenuItem(menu, file) {
+    menu.addItem((item) => {
+      item.setTitle("Open or create companion note").setIcon("file-plus-2").onClick(() => this.openOrCreateCompanion(file));
+    });
+  }
+  addBatchCompanionMenuItem(menu, files) {
+    menu.addItem((item) => {
+      item.setTitle("Create companion notes").setIcon("files").onClick(() => this.createCompanionBatch(files));
+    });
+  }
+  async openOrCreateCompanion(file) {
+    const index = this.getCompanionIndexOrNotify();
+    if (index == null) {
+      return;
+    }
+    let modelContent = null;
+    if ((index.bySourcePath.get(file.path) ?? []).length === 0) {
+      const loadedModel = await this.readCompanionTemplateOrNotify();
+      if (loadedModel === void 0) {
+        return;
+      }
+      modelContent = loadedModel;
+    }
+    const result = await createCompanionIfNeeded(this.app, file, index, modelContent);
+    if (result.kind === "ambiguous") {
+      const paths = result.notes.map((note) => note.path).join(", ");
+      console.error(`${LOG_PREFIX} Ambiguous companion association for ${file.path}: ${paths}`);
+      new import_obsidian3.Notice(`Multiple companion notes declare ${file.name} as source: ${paths}`);
+      return;
+    }
+    if (result.kind === "error") {
+      console.error(`${LOG_PREFIX} Failed to create companion for ${file.path}`, result.error);
+      new import_obsidian3.Notice(`Could not open or create a companion note for ${file.name}.`);
+      return;
+    }
+    if (result.kind === "created") {
+      if (result.conflictResolved) {
+        console.warn(`${LOG_PREFIX} Companion name conflict for ${file.path}; using ${result.path}`);
+      }
+      console.info(`${LOG_PREFIX} Companion created: ${result.note.path} (source: ${file.path})`);
+    } else {
+      console.info(`${LOG_PREFIX} Existing companion found: ${result.note.path} (source: ${file.path})`);
+    }
+    try {
+      await this.app.workspace.getLeaf(false).openFile(result.note);
+    } catch (error) {
+      console.error(`${LOG_PREFIX} Failed to open companion ${result.note.path}`, error);
+      new import_obsidian3.Notice(`Companion note exists but could not be opened: ${result.note.path}`);
+    }
+  }
+  async createCompanionBatch(files) {
+    const eligibleFiles = files.filter(isEligibleFile);
+    const ignored = files.length - eligibleFiles.length;
+    const index = this.getCompanionIndexOrNotify(false);
+    if (index == null) {
+      this.showBatchSummary(0, 0, ignored, eligibleFiles.length);
+      return;
+    }
+    let created = 0;
+    let alreadyExisting = 0;
+    let errors = 0;
+    let modelLoaded = false;
+    let modelContent = null;
+    for (const file of eligibleFiles) {
+      if ((index.bySourcePath.get(file.path) ?? []).length === 0 && !modelLoaded) {
+        modelContent = await this.readCompanionTemplateOrNotify();
+        modelLoaded = true;
+      }
+      if ((index.bySourcePath.get(file.path) ?? []).length === 0 && modelContent === void 0) {
+        errors += 1;
+        continue;
+      }
+      const result = await createCompanionIfNeeded(this.app, file, index, modelContent ?? null);
+      if (result.kind === "created") {
+        created += 1;
+        if (result.conflictResolved) {
+          console.warn(`${LOG_PREFIX} Companion name conflict for ${file.path}; using ${result.path}`);
+        }
+        console.info(`${LOG_PREFIX} Companion created: ${result.note.path} (source: ${file.path})`);
+      } else if (result.kind === "alreadyExisting") {
+        alreadyExisting += 1;
+        console.info(`${LOG_PREFIX} Existing companion found: ${result.note.path} (source: ${file.path})`);
+      } else if (result.kind === "ambiguous") {
+        errors += 1;
+        console.error(
+          `${LOG_PREFIX} Ambiguous companion association for ${file.path}: ${result.notes.map((note) => note.path).join(", ")}`
+        );
+      } else {
+        errors += 1;
+        console.error(`${LOG_PREFIX} Failed to create companion for ${file.path}`, result.error);
+      }
+    }
+    this.showBatchSummary(created, alreadyExisting, ignored, errors);
+  }
+  getCompanionIndexOrNotify(notify = true) {
+    const index = buildCompanionIndex(this.app);
+    if (index.missingMetadata.length === 0) {
+      return index;
+    }
+    console.error(
+      `${LOG_PREFIX} Companion discovery stopped because metadata is unavailable for: ${index.missingMetadata.join(", ")}`
+    );
+    if (notify) {
+      new import_obsidian3.Notice("Companion notes could not be checked because Obsidian metadata is not ready.");
+    }
+    return null;
+  }
+  showBatchSummary(created, alreadyExisting, ignored, errors) {
+    const parts = [`${created} created`, `${alreadyExisting} already existed`];
+    if (ignored > 0) {
+      parts.push(`${ignored} ignored`);
+    }
+    parts.push(`${errors} failed`);
+    const message = `Companion notes: ${parts.join(", ")}.`;
+    console.info(`${LOG_PREFIX} ${message}`);
+    new import_obsidian3.Notice(message);
+  }
+  startNotebookNavigatorRegistration() {
+    let attempts = 0;
+    const tryRegistration = () => {
+      this.notebookNavigatorRegistrationTimer = null;
+      if (this.registerNotebookNavigatorMenus()) {
+        return;
+      }
+      attempts += 1;
+      if (attempts >= NOTEBOOK_NAVIGATOR_MAX_RETRIES) {
+        return;
+      }
+      this.notebookNavigatorRegistrationTimer = setTimeout(
+        tryRegistration,
+        NOTEBOOK_NAVIGATOR_RETRY_INTERVAL_MS
+      );
+    };
+    tryRegistration();
+  }
+  registerNotebookNavigatorMenus() {
+    if (this.notebookNavigatorMenusRegistered) {
+      return true;
+    }
+    const registry = this.app.plugins;
+    const plugin = registry?.getPlugin?.(NOTEBOOK_NAVIGATOR_PLUGIN_ID) ?? registry?.plugins?.[NOTEBOOK_NAVIGATOR_PLUGIN_ID];
+    const api = plugin?.api;
+    if (api == null || typeof api.getVersion !== "function" || typeof api.menus?.registerFileMenu !== "function") {
+      return false;
+    }
+    const majorVersion = Number.parseInt(api.getVersion().split(".")[0] ?? "", 10);
+    if (!Number.isFinite(majorVersion) || majorVersion < 2) {
+      console.warn(`${LOG_PREFIX} Notebook Navigator 2.0.0 or newer is required for menu integration`);
+      return true;
+    }
+    const dispose = api.menus.registerFileMenu((context) => {
+      if (context.selection.mode === "multiple") {
+        if (context.selection.files.length >= 2 && context.selection.files.some(isEligibleFile)) {
+          context.addItem((item) => {
+            item.setTitle("Create companion notes");
+            item.setIcon("files");
+            item.onClick(() => this.createCompanionBatch(context.selection.files));
+          });
+        }
+        return;
+      }
+      if (isEligibleFile(context.file)) {
+        context.addItem((item) => {
+          item.setTitle("Open or create companion note");
+          item.setIcon("file-plus-2");
+          item.onClick(() => this.openOrCreateCompanion(context.file));
+        });
+      }
+    });
+    this.notebookNavigatorMenusRegistered = true;
+    this.register(dispose);
+    console.info(`${LOG_PREFIX} Notebook Navigator companion menus registered`);
+    return true;
+  }
   async handleRename(file, oldPath) {
-    if (!(file instanceof import_obsidian.TFile)) {
+    if (!(file instanceof import_obsidian3.TFile)) {
       return;
     }
     if (file.extension.toLowerCase() !== "md") {
@@ -88,7 +550,7 @@ var MoveAttachmentsWithNotePlugin = class extends import_obsidian.Plugin {
     let errorCount = 0;
     for (const linkedPath of linkedPaths) {
       const candidate = this.app.vault.getAbstractFileByPath(linkedPath);
-      if (!(candidate instanceof import_obsidian.TFile)) {
+      if (!(candidate instanceof import_obsidian3.TFile)) {
         brokenSkippedCount += 1;
         console.warn(
           `${LOG_PREFIX} Ignoring unresolved attachment link: ${linkedPath} (note: ${file.path})`
