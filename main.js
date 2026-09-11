@@ -24,13 +24,11 @@ __export(main_exports, {
   default: () => MoveAttachmentsWithNotePlugin
 });
 module.exports = __toCommonJS(main_exports);
+var import_obsidian3 = require("obsidian");
+
+// src/linked-note.ts
 var import_obsidian = require("obsidian");
-var LOG_PREFIX = "[move-attachments-with-note]";
-var LINK_CACHE_DELAY_MS = 150;
 var MAX_SUFFIX_ATTEMPTS = 1e4;
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 function getDirectory(path) {
   const normalized = (0, import_obsidian.normalizePath)(path);
   const splitIndex = normalized.lastIndexOf("/");
@@ -44,24 +42,418 @@ function buildNumberedName(fileName, suffix) {
   if (extIndex <= 0) {
     return `${fileName}-${suffix}`;
   }
-  const base = fileName.slice(0, extIndex);
-  const ext = fileName.slice(extIndex);
-  return `${base}-${suffix}${ext}`;
+  return `${fileName.slice(0, extIndex)}-${suffix}${fileName.slice(extIndex)}`;
 }
-var MoveAttachmentsWithNotePlugin = class extends import_obsidian.Plugin {
+function isEligibleFile(file) {
+  return file instanceof import_obsidian.TFile;
+}
+function getCommonDirectory(files) {
+  if (files.length === 0) {
+    return "";
+  }
+  const directories = files.map((file) => getDirectory(file.path).split("/").filter(Boolean));
+  const common = [];
+  for (let index = 0; index < directories[0].length; index += 1) {
+    const segment = directories[0][index];
+    if (!directories.every((directory) => directory[index] === segment)) {
+      break;
+    }
+    common.push(segment);
+  }
+  return common.join("/");
+}
+function findAvailablePath(app, directory, fileName) {
+  const primaryPath = buildPath(directory, fileName);
+  if (app.vault.getAbstractFileByPath(primaryPath) == null) {
+    return { path: primaryPath, conflictResolved: false };
+  }
+  for (let suffix = 1; suffix <= MAX_SUFFIX_ATTEMPTS; suffix += 1) {
+    const candidatePath = buildPath(directory, buildNumberedName(fileName, suffix));
+    if (app.vault.getAbstractFileByPath(candidatePath) == null) {
+      return { path: candidatePath, conflictResolved: true };
+    }
+  }
+  return null;
+}
+function findAvailableLinkedNotePath(app, sourceFiles, now = Date.now()) {
+  if (sourceFiles.length === 0) {
+    return null;
+  }
+  if (sourceFiles.length === 1) {
+    const source = sourceFiles[0];
+    const directory2 = getDirectory(source.path);
+    const primaryPath = buildPath(directory2, `${source.basename}.md`);
+    if (app.vault.getAbstractFileByPath(primaryPath) == null) {
+      return { path: primaryPath, conflictResolved: false };
+    }
+    const token = source.extension.length > 0 ? source.extension : "file";
+    const fallback = findAvailablePath(app, directory2, `${source.basename} - ${token}.md`);
+    return fallback == null ? null : { path: fallback.path, conflictResolved: true };
+  }
+  const directory = getCommonDirectory(sourceFiles);
+  return findAvailablePath(
+    app,
+    directory,
+    `${(0, import_obsidian.moment)(now).format("YYYY-MM-DD HH.mm")} Collection.md`
+  );
+}
+function expandStandardPlaceholders(content, title, now) {
+  const timestamp = (0, import_obsidian.moment)(now);
+  return content.replace(
+    /\{\{date(?::([^}]+))?\}\}/g,
+    (_match, format) => timestamp.format(format ?? "YYYY-MM-DD")
+  ).replace(
+    /\{\{time(?::([^}]+))?\}\}/g,
+    (_match, format) => timestamp.format(format ?? "HH:mm")
+  ).replace(/\{\{title\}\}/g, () => title);
+}
+function buildLinkedNoteContent(linktexts, modelContent, title, now = Date.now()) {
+  const links = linktexts.map((linktext) => `[[${linktext}]]`);
+  const embeds = linktexts.map((linktext) => `![[${linktext}]]`).join("\n");
+  if (modelContent == null) {
+    return `${embeds}
+`;
+  }
+  const hasEmbedPlaceholder = /\{\{embeds?\}\}/.test(modelContent);
+  let content = expandStandardPlaceholders(modelContent, title, now).replace(/\{\{link\}\}/g, () => links[0] ?? "").replace(/\{\{links\}\}/g, () => links.map((link) => `- ${link}`).join("\n")).replace(/\{\{embeds?\}\}/g, () => embeds);
+  if (!hasEmbedPlaceholder) {
+    content = `${content.trimEnd()}${content.trim().length > 0 ? "\n" : ""}${embeds}
+`;
+  } else if (!content.endsWith("\n")) {
+    content += "\n";
+  }
+  return content;
+}
+async function createLinkedNote(app, sourceFiles, modelContent = null, now = Date.now()) {
+  const currentFiles = [];
+  const seenPaths = /* @__PURE__ */ new Set();
+  for (const sourceFile of sourceFiles) {
+    const current = app.vault.getAbstractFileByPath(sourceFile.path);
+    if (!isEligibleFile(current)) {
+      return { kind: "error", error: new Error(`Selected file is no longer available: ${sourceFile.path}`) };
+    }
+    if (!seenPaths.has(current.path)) {
+      currentFiles.push(current);
+      seenPaths.add(current.path);
+    }
+  }
+  if (currentFiles.length === 0) {
+    return { kind: "error", error: new Error("At least one file must be selected") };
+  }
+  const target = findAvailableLinkedNotePath(app, currentFiles, now);
+  if (target == null) {
+    return { kind: "error", error: new Error("Could not allocate a linked note name") };
+  }
+  const linktexts = currentFiles.map(
+    (file) => app.metadataCache.fileToLinktext(file, target.path, false)
+  );
+  const targetFileName = target.path.slice(target.path.lastIndexOf("/") + 1);
+  const content = buildLinkedNoteContent(linktexts, modelContent, targetFileName.slice(0, -3), now);
+  try {
+    const note = await app.vault.create(target.path, content);
+    return { kind: "created", note, path: target.path, conflictResolved: target.conflictResolved };
+  } catch (error) {
+    return { kind: "error", error };
+  }
+}
+
+// src/settings.ts
+var import_obsidian2 = require("obsidian");
+var DEFAULT_SETTINGS = {
+  noteTemplatePath: ""
+};
+var MarkdownFileSuggest = class extends import_obsidian2.AbstractInputSuggest {
+  constructor(app, input, onChoose) {
+    super(app, input.inputEl);
+    this.onSelect(onChoose);
+  }
+  getSuggestions(query) {
+    const normalizedQuery = query.trim().toLowerCase();
+    return this.app.vault.getMarkdownFiles().filter((file) => normalizedQuery.length === 0 || file.path.toLowerCase().includes(normalizedQuery)).slice(0, 100);
+  }
+  renderSuggestion(file, el) {
+    el.setText(file.path);
+  }
+};
+var MoveAttachmentsWithNoteSettingTab = class extends import_obsidian2.PluginSettingTab {
+  constructor(app, owner) {
+    super(app, owner);
+    this.owner = owner;
+  }
+  display() {
+    const { containerEl } = this;
+    containerEl.empty();
+    new import_obsidian2.Setting(containerEl).setName("Linked note model").setDesc("Choose any Markdown note in the vault to use as the model for notes created from selected files. Leave blank to create a note containing only the file embeds.").addText((text) => {
+      text.setPlaceholder("Path/to/model.md").setValue(this.owner.settings.noteTemplatePath).onChange(async (value) => {
+        this.owner.settings.noteTemplatePath = value.trim().length === 0 ? "" : (0, import_obsidian2.normalizePath)(value.trim());
+        await this.owner.saveSettings();
+      });
+      new MarkdownFileSuggest(this.app, text, (file) => {
+        text.setValue(file.path);
+        this.owner.settings.noteTemplatePath = file.path;
+        void this.owner.saveSettings();
+      });
+    });
+  }
+};
+
+// src/main.ts
+var LOG_PREFIX = "[move-attachments-with-note]";
+var LINK_CACHE_DELAY_MS = 150;
+var FILE_EXPLORER_MENU_SOURCE = "file-explorer-context-menu";
+var NOTEBOOK_NAVIGATOR_PLUGIN_ID = "notebook-navigator";
+var NOTEBOOK_NAVIGATOR_RETRY_INTERVAL_MS = 250;
+var NOTEBOOK_NAVIGATOR_MAX_RETRIES = 40;
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+var MoveAttachmentsWithNotePlugin = class extends import_obsidian3.Plugin {
+  constructor() {
+    super(...arguments);
+    this.settings = { ...DEFAULT_SETTINGS };
+    this.queuedFilePaths = /* @__PURE__ */ new Set();
+    this.notebookNavigatorMenusRegistered = false;
+    this.notebookNavigatorRegistrationTimer = null;
+  }
   async onload() {
     console.info(`${LOG_PREFIX} loaded`);
+    await this.loadSettings();
+    this.addSettingTab(new MoveAttachmentsWithNoteSettingTab(this.app, this));
     this.registerEvent(
       this.app.vault.on("rename", (file, oldPath) => {
         void this.handleRename(file, oldPath);
+        void this.handleTemplateRename(file, oldPath);
+        this.handleQueuedFileRename(file, oldPath);
       })
     );
+    this.registerEvent(
+      this.app.vault.on("delete", (file) => {
+        this.queuedFilePaths.delete(file.path);
+      })
+    );
+    this.registerEvent(
+      this.app.workspace.on("file-menu", (menu, file, source) => {
+        if (source === FILE_EXPLORER_MENU_SOURCE && isEligibleFile(file)) {
+          this.addCreateNoteMenuItem(menu, [file]);
+          this.addQueuedSelectionMenuItems(menu, file);
+        }
+      })
+    );
+    this.registerEvent(
+      this.app.workspace.on("files-menu", (menu, files) => {
+        const eligibleFiles = files.filter(isEligibleFile);
+        if (eligibleFiles.length > 0) {
+          this.addCreateNoteMenuItem(menu, eligibleFiles);
+        }
+      })
+    );
+    this.addCommand({
+      id: "create-note-for-active-file",
+      name: "Create note for active file",
+      checkCallback: (checking) => {
+        const file = this.app.workspace.getActiveFile();
+        const available = isEligibleFile(file);
+        if (available && !checking) {
+          void this.createNoteFromSelection([file]);
+        }
+        return available;
+      }
+    });
+    this.app.workspace.onLayoutReady(() => {
+      this.startNotebookNavigatorRegistration();
+    });
+    this.register(() => {
+      if (this.notebookNavigatorRegistrationTimer != null) {
+        clearTimeout(this.notebookNavigatorRegistrationTimer);
+      }
+    });
   }
   onunload() {
     console.info(`${LOG_PREFIX} unloaded`);
   }
+  async saveSettings() {
+    await this.saveData(this.settings);
+  }
+  async loadSettings() {
+    const saved = await this.loadData();
+    this.settings = {
+      ...DEFAULT_SETTINGS,
+      noteTemplatePath: saved?.noteTemplatePath ?? saved?.companionTemplatePath ?? saved?.collectionTemplatePath ?? ""
+    };
+  }
+  async handleTemplateRename(file, oldPath) {
+    if (!(file instanceof import_obsidian3.TFile)) {
+      return;
+    }
+    if (oldPath === this.settings.noteTemplatePath) {
+      this.settings.noteTemplatePath = file.path;
+      await this.saveSettings();
+    }
+  }
+  async readNoteModelOrNotify() {
+    const path = this.settings.noteTemplatePath;
+    if (path.length === 0) {
+      return null;
+    }
+    const model = this.app.vault.getAbstractFileByPath(path);
+    if (!(model instanceof import_obsidian3.TFile) || model.extension.toLowerCase() !== "md") {
+      console.error(`${LOG_PREFIX} Linked note model is unavailable: ${path}`);
+      new import_obsidian3.Notice(`Linked note model is unavailable: ${path}`);
+      return void 0;
+    }
+    try {
+      return await this.app.vault.cachedRead(model);
+    } catch (error) {
+      console.error(`${LOG_PREFIX} Could not read linked note model: ${path}`, error);
+      new import_obsidian3.Notice(`Could not read linked note model: ${path}`);
+      return void 0;
+    }
+  }
+  addCreateNoteMenuItem(menu, files) {
+    const title = files.length === 1 ? "Create note for file" : "Create note for selected files";
+    menu.addItem((item) => {
+      item.setTitle(title).setIcon("file-plus-2").onClick(() => this.createNoteFromSelection(files));
+    });
+  }
+  getQueuedFiles() {
+    const files = [];
+    for (const path of this.queuedFilePaths) {
+      const file = this.app.vault.getAbstractFileByPath(path);
+      if (file instanceof import_obsidian3.TFile) {
+        files.push(file);
+      } else {
+        this.queuedFilePaths.delete(path);
+      }
+    }
+    return files;
+  }
+  addQueuedSelectionMenuItems(menu, file) {
+    const queuedFiles = this.getQueuedFiles();
+    const isQueued = this.queuedFilePaths.has(file.path);
+    menu.addItem((item) => {
+      item.setTitle(isQueued ? "Remove from note selection" : "Add to note selection").setIcon(isQueued ? "list-x" : "list-plus").onClick(() => this.toggleQueuedFile(file));
+    });
+    if (queuedFiles.length > 0) {
+      const filesToCreate = isQueued ? queuedFiles : [...queuedFiles, file];
+      menu.addItem((item) => {
+        item.setTitle(isQueued ? `Create note from selection (${filesToCreate.length})` : `Create note with selection + this file (${filesToCreate.length})`).setIcon("file-plus-2").onClick(() => this.createNoteFromQueuedSelection(filesToCreate));
+      });
+      menu.addItem((item) => {
+        item.setTitle(`Clear note selection (${queuedFiles.length})`).setIcon("list-restart").onClick(() => this.clearQueuedSelection());
+      });
+    }
+  }
+  toggleQueuedFile(file) {
+    if (this.queuedFilePaths.delete(file.path)) {
+      new import_obsidian3.Notice(`Removed from note selection: ${file.name} (${this.queuedFilePaths.size} selected)`);
+      return;
+    }
+    this.queuedFilePaths.add(file.path);
+    new import_obsidian3.Notice(`Added to note selection: ${file.name} (${this.queuedFilePaths.size} selected)`);
+  }
+  clearQueuedSelection() {
+    this.queuedFilePaths.clear();
+    new import_obsidian3.Notice("Note selection cleared.");
+  }
+  async createNoteFromQueuedSelection(files) {
+    if (await this.createNoteFromSelection(files)) {
+      this.queuedFilePaths.clear();
+    }
+  }
+  handleQueuedFileRename(file, oldPath) {
+    if (!this.queuedFilePaths.delete(oldPath)) {
+      return;
+    }
+    if (file instanceof import_obsidian3.TFile) {
+      this.queuedFilePaths.add(file.path);
+    }
+  }
+  async createNoteFromSelection(files) {
+    if (files.length === 0) {
+      return false;
+    }
+    const modelContent = await this.readNoteModelOrNotify();
+    if (modelContent === void 0) {
+      return false;
+    }
+    const result = await createLinkedNote(this.app, files, modelContent);
+    if (result.kind === "error") {
+      console.error(`${LOG_PREFIX} Failed to create note for selected files`, result.error);
+      new import_obsidian3.Notice("Could not create a note for the selected files.");
+      return false;
+    }
+    if (result.conflictResolved) {
+      console.warn(`${LOG_PREFIX} Note name conflict; using ${result.path}`);
+    }
+    console.info(`${LOG_PREFIX} Linked note created: ${result.path} (${files.length} files)`);
+    try {
+      await this.app.workspace.getLeaf(false).openFile(result.note);
+    } catch (error) {
+      console.error(`${LOG_PREFIX} Failed to open linked note ${result.path}`, error);
+      new import_obsidian3.Notice(`Note exists but could not be opened: ${result.path}`);
+    }
+    return true;
+  }
+  startNotebookNavigatorRegistration() {
+    let attempts = 0;
+    const tryRegistration = () => {
+      this.notebookNavigatorRegistrationTimer = null;
+      if (this.registerNotebookNavigatorMenus()) {
+        return;
+      }
+      attempts += 1;
+      if (attempts >= NOTEBOOK_NAVIGATOR_MAX_RETRIES) {
+        return;
+      }
+      this.notebookNavigatorRegistrationTimer = setTimeout(
+        tryRegistration,
+        NOTEBOOK_NAVIGATOR_RETRY_INTERVAL_MS
+      );
+    };
+    tryRegistration();
+  }
+  registerNotebookNavigatorMenus() {
+    if (this.notebookNavigatorMenusRegistered) {
+      return true;
+    }
+    const registry = this.app.plugins;
+    const plugin = registry?.getPlugin?.(NOTEBOOK_NAVIGATOR_PLUGIN_ID) ?? registry?.plugins?.[NOTEBOOK_NAVIGATOR_PLUGIN_ID];
+    const api = plugin?.api;
+    if (api == null || typeof api.getVersion !== "function" || typeof api.menus?.registerFileMenu !== "function") {
+      return false;
+    }
+    const majorVersion = Number.parseInt(api.getVersion().split(".")[0] ?? "", 10);
+    if (!Number.isFinite(majorVersion) || majorVersion < 2) {
+      console.warn(`${LOG_PREFIX} Notebook Navigator 2.0.0 or newer is required for menu integration`);
+      return true;
+    }
+    const dispose = api.menus.registerFileMenu((context) => {
+      if (context.selection.mode === "multiple") {
+        const eligibleFiles = context.selection.files.filter(isEligibleFile);
+        if (eligibleFiles.length > 0) {
+          context.addItem((item) => {
+            item.setTitle("Create note for selected files");
+            item.setIcon("file-plus-2");
+            item.onClick(() => this.createNoteFromSelection(eligibleFiles));
+          });
+        }
+        return;
+      }
+      if (isEligibleFile(context.file)) {
+        context.addItem((item) => {
+          item.setTitle("Create note for file");
+          item.setIcon("file-plus-2");
+          item.onClick(() => this.createNoteFromSelection([context.file]));
+        });
+      }
+    });
+    this.notebookNavigatorMenusRegistered = true;
+    this.register(dispose);
+    console.info(`${LOG_PREFIX} Notebook Navigator linked-note menus registered`);
+    return true;
+  }
   async handleRename(file, oldPath) {
-    if (!(file instanceof import_obsidian.TFile)) {
+    if (!(file instanceof import_obsidian3.TFile)) {
       return;
     }
     if (file.extension.toLowerCase() !== "md") {
@@ -88,7 +480,7 @@ var MoveAttachmentsWithNotePlugin = class extends import_obsidian.Plugin {
     let errorCount = 0;
     for (const linkedPath of linkedPaths) {
       const candidate = this.app.vault.getAbstractFileByPath(linkedPath);
-      if (!(candidate instanceof import_obsidian.TFile)) {
+      if (!(candidate instanceof import_obsidian3.TFile)) {
         brokenSkippedCount += 1;
         console.warn(
           `${LOG_PREFIX} Ignoring unresolved attachment link: ${linkedPath} (note: ${file.path})`
