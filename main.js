@@ -45,7 +45,7 @@ function buildNumberedName(fileName, suffix) {
   return `${fileName.slice(0, extIndex)}-${suffix}${fileName.slice(extIndex)}`;
 }
 function isEligibleFile(file) {
-  return file instanceof import_obsidian.TFile && file.extension.toLowerCase() !== "md";
+  return file instanceof import_obsidian.TFile;
 }
 function getCommonDirectory(files) {
   if (files.length === 0) {
@@ -126,15 +126,19 @@ function buildLinkedNoteContent(linktexts, modelContent, title, now = Date.now()
 }
 async function createLinkedNote(app, sourceFiles, modelContent = null, now = Date.now()) {
   const currentFiles = [];
+  const seenPaths = /* @__PURE__ */ new Set();
   for (const sourceFile of sourceFiles) {
     const current = app.vault.getAbstractFileByPath(sourceFile.path);
     if (!isEligibleFile(current)) {
       return { kind: "error", error: new Error(`Selected file is no longer available: ${sourceFile.path}`) };
     }
-    currentFiles.push(current);
+    if (!seenPaths.has(current.path)) {
+      currentFiles.push(current);
+      seenPaths.add(current.path);
+    }
   }
   if (currentFiles.length === 0) {
-    return { kind: "error", error: new Error("At least one non-Markdown file must be selected") };
+    return { kind: "error", error: new Error("At least one file must be selected") };
   }
   const target = findAvailableLinkedNotePath(app, currentFiles, now);
   if (target == null) {
@@ -207,6 +211,7 @@ var MoveAttachmentsWithNotePlugin = class extends import_obsidian3.Plugin {
   constructor() {
     super(...arguments);
     this.settings = { ...DEFAULT_SETTINGS };
+    this.queuedFilePaths = /* @__PURE__ */ new Set();
     this.notebookNavigatorMenusRegistered = false;
     this.notebookNavigatorRegistrationTimer = null;
   }
@@ -218,12 +223,19 @@ var MoveAttachmentsWithNotePlugin = class extends import_obsidian3.Plugin {
       this.app.vault.on("rename", (file, oldPath) => {
         void this.handleRename(file, oldPath);
         void this.handleTemplateRename(file, oldPath);
+        this.handleQueuedFileRename(file, oldPath);
+      })
+    );
+    this.registerEvent(
+      this.app.vault.on("delete", (file) => {
+        this.queuedFilePaths.delete(file.path);
       })
     );
     this.registerEvent(
       this.app.workspace.on("file-menu", (menu, file, source) => {
         if (source === FILE_EXPLORER_MENU_SOURCE && isEligibleFile(file)) {
           this.addCreateNoteMenuItem(menu, [file]);
+          this.addQueuedSelectionMenuItems(menu, file);
         }
       })
     );
@@ -303,19 +315,72 @@ var MoveAttachmentsWithNotePlugin = class extends import_obsidian3.Plugin {
       item.setTitle(title).setIcon("file-plus-2").onClick(() => this.createNoteFromSelection(files));
     });
   }
+  getQueuedFiles() {
+    const files = [];
+    for (const path of this.queuedFilePaths) {
+      const file = this.app.vault.getAbstractFileByPath(path);
+      if (file instanceof import_obsidian3.TFile) {
+        files.push(file);
+      } else {
+        this.queuedFilePaths.delete(path);
+      }
+    }
+    return files;
+  }
+  addQueuedSelectionMenuItems(menu, file) {
+    const queuedFiles = this.getQueuedFiles();
+    const isQueued = this.queuedFilePaths.has(file.path);
+    menu.addItem((item) => {
+      item.setTitle(isQueued ? "Remove from note selection" : "Add to note selection").setIcon(isQueued ? "list-x" : "list-plus").onClick(() => this.toggleQueuedFile(file));
+    });
+    if (queuedFiles.length > 0) {
+      const filesToCreate = isQueued ? queuedFiles : [...queuedFiles, file];
+      menu.addItem((item) => {
+        item.setTitle(isQueued ? `Create note from selection (${filesToCreate.length})` : `Create note with selection + this file (${filesToCreate.length})`).setIcon("file-plus-2").onClick(() => this.createNoteFromQueuedSelection(filesToCreate));
+      });
+      menu.addItem((item) => {
+        item.setTitle(`Clear note selection (${queuedFiles.length})`).setIcon("list-restart").onClick(() => this.clearQueuedSelection());
+      });
+    }
+  }
+  toggleQueuedFile(file) {
+    if (this.queuedFilePaths.delete(file.path)) {
+      new import_obsidian3.Notice(`Removed from note selection: ${file.name} (${this.queuedFilePaths.size} selected)`);
+      return;
+    }
+    this.queuedFilePaths.add(file.path);
+    new import_obsidian3.Notice(`Added to note selection: ${file.name} (${this.queuedFilePaths.size} selected)`);
+  }
+  clearQueuedSelection() {
+    this.queuedFilePaths.clear();
+    new import_obsidian3.Notice("Note selection cleared.");
+  }
+  async createNoteFromQueuedSelection(files) {
+    if (await this.createNoteFromSelection(files)) {
+      this.queuedFilePaths.clear();
+    }
+  }
+  handleQueuedFileRename(file, oldPath) {
+    if (!this.queuedFilePaths.delete(oldPath)) {
+      return;
+    }
+    if (file instanceof import_obsidian3.TFile) {
+      this.queuedFilePaths.add(file.path);
+    }
+  }
   async createNoteFromSelection(files) {
     if (files.length === 0) {
-      return;
+      return false;
     }
     const modelContent = await this.readNoteModelOrNotify();
     if (modelContent === void 0) {
-      return;
+      return false;
     }
     const result = await createLinkedNote(this.app, files, modelContent);
     if (result.kind === "error") {
       console.error(`${LOG_PREFIX} Failed to create note for selected files`, result.error);
       new import_obsidian3.Notice("Could not create a note for the selected files.");
-      return;
+      return false;
     }
     if (result.conflictResolved) {
       console.warn(`${LOG_PREFIX} Note name conflict; using ${result.path}`);
@@ -327,6 +392,7 @@ var MoveAttachmentsWithNotePlugin = class extends import_obsidian3.Plugin {
       console.error(`${LOG_PREFIX} Failed to open linked note ${result.path}`, error);
       new import_obsidian3.Notice(`Note exists but could not be opened: ${result.path}`);
     }
+    return true;
   }
   startNotebookNavigatorRegistration() {
     let attempts = 0;

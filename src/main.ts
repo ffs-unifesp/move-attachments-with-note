@@ -55,6 +55,7 @@ interface PluginRegistry {
 
 export default class MoveAttachmentsWithNotePlugin extends Plugin {
   settings: MoveAttachmentsWithNoteSettings = { ...DEFAULT_SETTINGS };
+  private queuedFilePaths = new Set<string>();
   private notebookNavigatorMenusRegistered = false;
   private notebookNavigatorRegistrationTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -67,6 +68,13 @@ export default class MoveAttachmentsWithNotePlugin extends Plugin {
       this.app.vault.on("rename", (file, oldPath) => {
         void this.handleRename(file, oldPath);
         void this.handleTemplateRename(file, oldPath);
+        this.handleQueuedFileRename(file, oldPath);
+      })
+    );
+
+    this.registerEvent(
+      this.app.vault.on("delete", (file) => {
+        this.queuedFilePaths.delete(file.path);
       })
     );
 
@@ -74,6 +82,7 @@ export default class MoveAttachmentsWithNotePlugin extends Plugin {
       this.app.workspace.on("file-menu", (menu, file, source) => {
         if (source === FILE_EXPLORER_MENU_SOURCE && isEligibleFile(file)) {
           this.addCreateNoteMenuItem(menu, [file]);
+          this.addQueuedSelectionMenuItems(menu, file);
         }
       })
     );
@@ -177,21 +186,92 @@ export default class MoveAttachmentsWithNotePlugin extends Plugin {
     });
   }
 
-  private async createNoteFromSelection(files: readonly TFile[]): Promise<void> {
-    if (files.length === 0) {
+  private getQueuedFiles(): TFile[] {
+    const files: TFile[] = [];
+    for (const path of this.queuedFilePaths) {
+      const file = this.app.vault.getAbstractFileByPath(path);
+      if (file instanceof TFile) {
+        files.push(file);
+      } else {
+        this.queuedFilePaths.delete(path);
+      }
+    }
+    return files;
+  }
+
+  private addQueuedSelectionMenuItems(menu: Menu, file: TFile): void {
+    const queuedFiles = this.getQueuedFiles();
+    const isQueued = this.queuedFilePaths.has(file.path);
+    menu.addItem((item) => {
+      item
+        .setTitle(isQueued ? "Remove from note selection" : "Add to note selection")
+        .setIcon(isQueued ? "list-x" : "list-plus")
+        .onClick(() => this.toggleQueuedFile(file));
+    });
+
+    if (queuedFiles.length > 0) {
+      const filesToCreate = isQueued ? queuedFiles : [...queuedFiles, file];
+      menu.addItem((item) => {
+        item
+          .setTitle(isQueued
+            ? `Create note from selection (${filesToCreate.length})`
+            : `Create note with selection + this file (${filesToCreate.length})`)
+          .setIcon("file-plus-2")
+          .onClick(() => this.createNoteFromQueuedSelection(filesToCreate));
+      });
+      menu.addItem((item) => {
+        item
+          .setTitle(`Clear note selection (${queuedFiles.length})`)
+          .setIcon("list-restart")
+          .onClick(() => this.clearQueuedSelection());
+      });
+    }
+  }
+
+  private toggleQueuedFile(file: TFile): void {
+    if (this.queuedFilePaths.delete(file.path)) {
+      new Notice(`Removed from note selection: ${file.name} (${this.queuedFilePaths.size} selected)`);
       return;
+    }
+    this.queuedFilePaths.add(file.path);
+    new Notice(`Added to note selection: ${file.name} (${this.queuedFilePaths.size} selected)`);
+  }
+
+  private clearQueuedSelection(): void {
+    this.queuedFilePaths.clear();
+    new Notice("Note selection cleared.");
+  }
+
+  private async createNoteFromQueuedSelection(files: readonly TFile[]): Promise<void> {
+    if (await this.createNoteFromSelection(files)) {
+      this.queuedFilePaths.clear();
+    }
+  }
+
+  private handleQueuedFileRename(file: TAbstractFile, oldPath: string): void {
+    if (!this.queuedFilePaths.delete(oldPath)) {
+      return;
+    }
+    if (file instanceof TFile) {
+      this.queuedFilePaths.add(file.path);
+    }
+  }
+
+  private async createNoteFromSelection(files: readonly TFile[]): Promise<boolean> {
+    if (files.length === 0) {
+      return false;
     }
 
     const modelContent = await this.readNoteModelOrNotify();
     if (modelContent === undefined) {
-      return;
+      return false;
     }
 
     const result = await createLinkedNote(this.app, files, modelContent);
     if (result.kind === "error") {
       console.error(`${LOG_PREFIX} Failed to create note for selected files`, result.error);
       new Notice("Could not create a note for the selected files.");
-      return;
+      return false;
     }
 
     if (result.conflictResolved) {
@@ -204,6 +284,7 @@ export default class MoveAttachmentsWithNotePlugin extends Plugin {
       console.error(`${LOG_PREFIX} Failed to open linked note ${result.path}`, error);
       new Notice(`Note exists but could not be opened: ${result.path}`);
     }
+    return true;
   }
 
   private startNotebookNavigatorRegistration(): void {

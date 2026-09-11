@@ -27,7 +27,7 @@ export function buildNumberedName(fileName: string, suffix: number): string {
 }
 
 export function isEligibleFile(file: TAbstractFile | null): file is TFile {
-  return file instanceof TFile && file.extension.toLowerCase() !== "md";
+  return file instanceof TFile;
 }
 
 export function getCommonDirectory(files: readonly TFile[]): string {
@@ -141,15 +141,19 @@ export async function createLinkedNote(
   now: number | Date = Date.now()
 ): Promise<CreateLinkedNoteResult> {
   const currentFiles: TFile[] = [];
+  const seenPaths = new Set<string>();
   for (const sourceFile of sourceFiles) {
     const current = app.vault.getAbstractFileByPath(sourceFile.path);
     if (!isEligibleFile(current)) {
       return { kind: "error", error: new Error(`Selected file is no longer available: ${sourceFile.path}`) };
     }
-    currentFiles.push(current);
+    if (!seenPaths.has(current.path)) {
+      currentFiles.push(current);
+      seenPaths.add(current.path);
+    }
   }
   if (currentFiles.length === 0) {
-    return { kind: "error", error: new Error("At least one non-Markdown file must be selected") };
+    return { kind: "error", error: new Error("At least one file must be selected") };
   }
 
   const target = findAvailableLinkedNotePath(app, currentFiles, now);

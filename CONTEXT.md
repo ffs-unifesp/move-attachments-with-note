@@ -5,7 +5,7 @@ This context covers notes created from selected vault files and the attachments 
 ## Language
 
 **Selected file**:
-A non-Markdown file chosen as input when creating a linked note.
+A file chosen as input when creating a linked note. It may be a Markdown note or any other file stored in the vault.
 _Avoid_: Source file, original file
 
 **Linked note**:
@@ -17,5 +17,5 @@ A Markdown note selected from anywhere in the vault whose properties and body pr
 _Avoid_: Global template, Templates folder
 
 **Eligible file**:
-A file that can be selected for a linked note; folders and Markdown files are ineligible.
+A vault file that can be selected for a linked note; only folders are ineligible.
 _Avoid_: Attachment type, supported format

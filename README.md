@@ -27,10 +27,11 @@ Obsidian plugin that moves attachments together with a note and creates linked n
 
 ## Linked notes
 
-- Right-click one non-Markdown file and choose **Create note for file** to create one note containing that file's embed.
+- Right-click any vault file, including a Markdown note, and choose **Create note for file** to create one note containing that file's embed.
 - Select multiple files and choose **Create note for selected files** to create one note containing all selected embeds.
-- Run **Create note for active file** from the Command Palette for the active non-Markdown file. No default hotkey is assigned.
+- Run **Create note for active file** from the Command Palette for any active file. No default hotkey is assigned.
 - The actions are available in the native File Explorer and in Notebook Navigator 2.0.0 or newer.
+- In the native File Explorer, non-contiguous files can be accumulated with **Add to note selection**. On another file, choose **Create note with selection + this file (N)**. The temporary selection is cleared after successful creation.
 - The plugin always creates a new note. Obsidian backlinks reveal every note that references a file.
 - No `source` or `sources` property is added or required.
 - Single-file notes are created beside the selected file. Multi-file notes are created in the deepest folder shared by the selection.

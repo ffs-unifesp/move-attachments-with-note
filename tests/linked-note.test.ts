@@ -104,10 +104,10 @@ describe("linked note domain logic", () => {
     Notice.messages = [];
   });
 
-  it("accepts non-Markdown files and rejects Markdown files and folders", () => {
+  it("accepts every vault file, including Markdown, and rejects folders", () => {
     expect(isEligibleFile(new TFile("paper.pdf"))).toBe(true);
     expect(isEligibleFile(new TFile("LICENSE"))).toBe(true);
-    expect(isEligibleFile(new TFile("README.MD"))).toBe(false);
+    expect(isEligibleFile(new TFile("README.MD"))).toBe(true);
     expect(isEligibleFile(new TFolder("archive"))).toBe(false);
   });
 
@@ -130,6 +130,14 @@ describe("linked note domain logic", () => {
     });
     expect(findAvailableLinkedNotePath(app, [new TFile("Report.PDF")])).toEqual({
       path: "Report - PDF-2.md",
+      conflictResolved: true
+    });
+  });
+
+  it("creates a collision-safe linked note for a selected Markdown note", () => {
+    const { app } = createTestApp({ files: ["A/Meeting.md"] });
+    expect(findAvailableLinkedNotePath(app, [new TFile("A/Meeting.md")])).toEqual({
+      path: "A/Meeting - md.md",
       conflictResolved: true
     });
   });
@@ -187,21 +195,25 @@ describe("linked note domain logic", () => {
     expect(contents.get("A/paper.md")).toBe("![[paper.pdf]]\n");
   });
 
-  it("creates one note for all selected files", async () => {
+  it("creates one note for all selected files, including Markdown notes", async () => {
     const now = new Date(2026, 8, 11, 10, 30);
     const { app, filesByPath, contents, create } = createTestApp({
       files: ["A/one.pdf", "A/two.pdf", "A/note.md"]
     });
     const result = await createLinkedNote(
       app,
-      [filesByPath.get("A/one.pdf") as TFile, filesByPath.get("A/two.pdf") as TFile],
+      [
+        filesByPath.get("A/one.pdf") as TFile,
+        filesByPath.get("A/two.pdf") as TFile,
+        filesByPath.get("A/note.md") as TFile
+      ],
       null,
       now
     );
     expect(result).toMatchObject({ kind: "created", path: "A/2026-09-11 10.30 Collection.md" });
     expect(create).toHaveBeenCalledTimes(1);
     expect(contents.get("A/2026-09-11 10.30 Collection.md")).toBe(
-      "![[one.pdf]]\n![[two.pdf]]\n"
+      "![[one.pdf]]\n![[two.pdf]]\n![[note.md]]\n"
     );
   });
 });
@@ -242,7 +254,10 @@ describe("linked note plugin flows", () => {
     const fileMenu = eventHandlers.get("file-menu")!;
     const singleMenu = new Menu();
     fileMenu(singleMenu, filesByPath.get("paper.pdf"), "file-explorer-context-menu");
-    expect(singleMenu.items.map((item) => item.title)).toEqual(["Create note for file"]);
+    expect(singleMenu.items.map((item) => item.title)).toEqual([
+      "Create note for file",
+      "Add to note selection"
+    ]);
 
     const filesMenu = eventHandlers.get("files-menu")!;
     const multipleMenu = new Menu();
@@ -254,6 +269,33 @@ describe("linked note plugin flows", () => {
     expect(multipleMenu.items.map((item) => item.title)).toEqual(["Create note for selected files"]);
   });
 
+  it("accumulates non-contiguous File Explorer files and creates one linked note", async () => {
+    const { plugin, filesByPath, eventHandlers, create } = createTestApp({
+      files: ["paper.pdf", "meeting.md"]
+    });
+    await plugin.onload();
+
+    const fileMenu = eventHandlers.get("file-menu")!;
+    const firstMenu = new Menu();
+    fileMenu(firstMenu, filesByPath.get("paper.pdf"), "file-explorer-context-menu");
+    firstMenu.items[1].click!();
+    expect(Notice.messages.at(-1)).toContain("1 selected");
+
+    const secondMenu = new Menu();
+    fileMenu(secondMenu, filesByPath.get("meeting.md"), "file-explorer-context-menu");
+    expect(secondMenu.items.map((item) => item.title)).toEqual([
+      "Create note for file",
+      "Add to note selection",
+      "Create note with selection + this file (2)",
+      "Clear note selection (1)"
+    ]);
+    await secondMenu.items[2].click!();
+
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(create.mock.calls[0][1]).toContain("![[paper.pdf]]");
+    expect(create.mock.calls[0][1]).toContain("![[meeting.md]]");
+  });
+
   it("registers adaptive Notebook Navigator menus", async () => {
     let notebookMenuCallback: ((context: any) => void) | null = null;
     const registerFileMenu = vi.fn((callback: (context: any) => void) => {
@@ -261,7 +303,7 @@ describe("linked note plugin flows", () => {
       return vi.fn();
     });
     const { plugin, filesByPath } = createTestApp({
-      files: ["paper.pdf", "figure.png"],
+      files: ["paper.pdf", "figure.png", "meeting.md"],
       notebookNavigator: { version: "2.5.0", registerFileMenu }
     });
     await plugin.onload();
@@ -280,7 +322,11 @@ describe("linked note plugin flows", () => {
       file: filesByPath.get("paper.pdf"),
       selection: {
         mode: "multiple",
-        files: [filesByPath.get("paper.pdf"), filesByPath.get("figure.png")]
+        files: [
+          filesByPath.get("paper.pdf"),
+          filesByPath.get("figure.png"),
+          filesByPath.get("meeting.md")
+        ]
       }
     });
     expect(multipleMenu.items.map((item) => item.title)).toEqual(["Create note for selected files"]);
@@ -293,7 +339,7 @@ describe("linked note plugin flows", () => {
     expect(plugin.settings.noteTemplatePath).toBe("Templates/Old model.md");
   });
 
-  it("exposes the command only for an active eligible file", async () => {
+  it("exposes the command for active attachments and Markdown notes", async () => {
     const eligible = createTestApp({ files: ["paper.pdf"], activeFile: "paper.pdf" });
     await eligible.plugin.onload();
     expect(eligible.plugin.commands[0].id).toBe("create-note-for-active-file");
@@ -301,6 +347,10 @@ describe("linked note plugin flows", () => {
 
     const markdown = createTestApp({ files: ["note.md"], activeFile: "note.md" });
     await markdown.plugin.onload();
-    expect(markdown.plugin.commands[0].checkCallback(true)).toBe(false);
+    expect(markdown.plugin.commands[0].checkCallback(true)).toBe(true);
+
+    const none = createTestApp({ files: [] });
+    await none.plugin.onload();
+    expect(none.plugin.commands[0].checkCallback(true)).toBe(false);
   });
 });
