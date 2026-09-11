@@ -3,14 +3,11 @@ import { Menu, Notice, Plugin, TAbstractFile, TFile } from "obsidian";
 import {
   buildNumberedName,
   buildPath,
-  buildCompanionIndex,
-  CompanionIndex,
-  createCollectionNote,
-  createCompanionIfNeeded,
+  createLinkedNote,
   getDirectory,
   isEligibleFile,
   MAX_SUFFIX_ATTEMPTS
-} from "./companion";
+} from "./linked-note";
 import {
   DEFAULT_SETTINGS,
   MoveAttachmentsWithNoteSettings,
@@ -76,27 +73,28 @@ export default class MoveAttachmentsWithNotePlugin extends Plugin {
     this.registerEvent(
       this.app.workspace.on("file-menu", (menu, file, source) => {
         if (source === FILE_EXPLORER_MENU_SOURCE && isEligibleFile(file)) {
-          this.addSingleCompanionMenuItem(menu, file);
+          this.addCreateNoteMenuItem(menu, [file]);
         }
       })
     );
 
     this.registerEvent(
       this.app.workspace.on("files-menu", (menu, files) => {
-        if (files.length >= 2 && files.some(isEligibleFile)) {
-          this.addBatchCompanionMenuItem(menu, files);
+        const eligibleFiles = files.filter(isEligibleFile);
+        if (eligibleFiles.length > 0) {
+          this.addCreateNoteMenuItem(menu, eligibleFiles);
         }
       })
     );
 
     this.addCommand({
-      id: "open-or-create-companion-note-for-active-file",
-      name: "Open or create companion note for active file",
+      id: "create-note-for-active-file",
+      name: "Create note for active file",
       checkCallback: (checking) => {
         const file = this.app.workspace.getActiveFile();
         const available = isEligibleFile(file);
         if (available && !checking) {
-          void this.openOrCreateCompanion(file);
+          void this.createNoteFromSelection([file]);
         }
         return available;
       }
@@ -121,7 +119,17 @@ export default class MoveAttachmentsWithNotePlugin extends Plugin {
   }
 
   private async loadSettings(): Promise<void> {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    const saved = await this.loadData() as Partial<MoveAttachmentsWithNoteSettings> & {
+      companionTemplatePath?: string;
+      collectionTemplatePath?: string;
+    } | null;
+    this.settings = {
+      ...DEFAULT_SETTINGS,
+      noteTemplatePath: saved?.noteTemplatePath
+        ?? saved?.companionTemplatePath
+        ?? saved?.collectionTemplatePath
+        ?? ""
+    };
   }
 
   private async handleTemplateRename(file: TAbstractFile, oldPath: string): Promise<void> {
@@ -129,225 +137,73 @@ export default class MoveAttachmentsWithNotePlugin extends Plugin {
       return;
     }
 
-    let changed = false;
-    if (oldPath === this.settings.companionTemplatePath) {
-      this.settings.companionTemplatePath = file.path;
-      changed = true;
-    }
-    if (oldPath === this.settings.collectionTemplatePath) {
-      this.settings.collectionTemplatePath = file.path;
-      changed = true;
-    }
-    if (changed) {
+    if (oldPath === this.settings.noteTemplatePath) {
+      this.settings.noteTemplatePath = file.path;
       await this.saveSettings();
     }
   }
 
-  private async readNoteModelOrNotify(path: string, label: string): Promise<string | null | undefined> {
+  private async readNoteModelOrNotify(): Promise<string | null | undefined> {
+    const path = this.settings.noteTemplatePath;
     if (path.length === 0) {
       return null;
     }
 
     const model = this.app.vault.getAbstractFileByPath(path);
     if (!(model instanceof TFile) || model.extension.toLowerCase() !== "md") {
-      console.error(`${LOG_PREFIX} ${label} is unavailable: ${path}`);
-      new Notice(`${label} is unavailable: ${path}`);
+      console.error(`${LOG_PREFIX} Linked note model is unavailable: ${path}`);
+      new Notice(`Linked note model is unavailable: ${path}`);
       return undefined;
     }
 
     try {
       return await this.app.vault.cachedRead(model);
     } catch (error) {
-      console.error(`${LOG_PREFIX} Could not read ${label.toLowerCase()}: ${path}`, error);
-      new Notice(`Could not read ${label.toLowerCase()}: ${path}`);
+      console.error(`${LOG_PREFIX} Could not read linked note model: ${path}`, error);
+      new Notice(`Could not read linked note model: ${path}`);
       return undefined;
     }
   }
 
-  private readCompanionTemplateOrNotify(): Promise<string | null | undefined> {
-    return this.readNoteModelOrNotify(this.settings.companionTemplatePath, "Companion note model");
-  }
-
-  private readCollectionTemplateOrNotify(): Promise<string | null | undefined> {
-    return this.readNoteModelOrNotify(this.settings.collectionTemplatePath, "Collection note model");
-  }
-
-  private addSingleCompanionMenuItem(menu: Menu, file: TFile): void {
+  private addCreateNoteMenuItem(menu: Menu, files: readonly TFile[]): void {
+    const title = files.length === 1
+      ? "Create note for file"
+      : "Create note for selected files";
     menu.addItem((item) => {
       item
-        .setTitle("Open or create companion note")
+        .setTitle(title)
         .setIcon("file-plus-2")
-        .onClick(() => this.openOrCreateCompanion(file));
+        .onClick(() => this.createNoteFromSelection(files));
     });
   }
 
-  private addBatchCompanionMenuItem(menu: Menu, files: readonly TAbstractFile[]): void {
-    menu.addItem((item) => {
-      item
-        .setTitle("Create companion notes")
-        .setIcon("files")
-        .onClick(() => this.createCompanionBatch(files));
-    });
-
-    if (files.filter(isEligibleFile).length >= 2) {
-      menu.addItem((item) => {
-        item
-          .setTitle("Create collection note from selected files")
-          .setIcon("notebook-tabs")
-          .onClick(() => this.createCollectionFromSelection(files));
-      });
-    }
-  }
-
-  private async createCollectionFromSelection(files: readonly TAbstractFile[]): Promise<void> {
-    const eligibleFiles = files.filter(isEligibleFile);
-    if (eligibleFiles.length < 2) {
-      new Notice("Select at least two non-Markdown files to create a collection note.");
+  private async createNoteFromSelection(files: readonly TFile[]): Promise<void> {
+    if (files.length === 0) {
       return;
     }
 
-    const modelContent = await this.readCollectionTemplateOrNotify();
+    const modelContent = await this.readNoteModelOrNotify();
     if (modelContent === undefined) {
       return;
     }
 
-    const result = await createCollectionNote(this.app, eligibleFiles, modelContent);
+    const result = await createLinkedNote(this.app, files, modelContent);
     if (result.kind === "error") {
-      console.error(`${LOG_PREFIX} Failed to create collection note`, result.error);
-      new Notice("Could not create a collection note for the selected files.");
+      console.error(`${LOG_PREFIX} Failed to create note for selected files`, result.error);
+      new Notice("Could not create a note for the selected files.");
       return;
     }
 
-    console.info(`${LOG_PREFIX} Collection note created: ${result.path} (${eligibleFiles.length} sources)`);
+    if (result.conflictResolved) {
+      console.warn(`${LOG_PREFIX} Note name conflict; using ${result.path}`);
+    }
+    console.info(`${LOG_PREFIX} Linked note created: ${result.path} (${files.length} files)`);
     try {
       await this.app.workspace.getLeaf(false).openFile(result.note);
     } catch (error) {
-      console.error(`${LOG_PREFIX} Failed to open collection note ${result.path}`, error);
-      new Notice(`Collection note exists but could not be opened: ${result.path}`);
+      console.error(`${LOG_PREFIX} Failed to open linked note ${result.path}`, error);
+      new Notice(`Note exists but could not be opened: ${result.path}`);
     }
-  }
-
-  private async openOrCreateCompanion(file: TFile): Promise<void> {
-    const index = this.getCompanionIndexOrNotify();
-    if (index == null) {
-      return;
-    }
-
-    let modelContent: string | null = null;
-    if ((index.bySourcePath.get(file.path) ?? []).length === 0) {
-      const loadedModel = await this.readCompanionTemplateOrNotify();
-      if (loadedModel === undefined) {
-        return;
-      }
-      modelContent = loadedModel;
-    }
-
-    const result = await createCompanionIfNeeded(this.app, file, index, modelContent);
-    if (result.kind === "ambiguous") {
-      const paths = result.notes.map((note) => note.path).join(", ");
-      console.error(`${LOG_PREFIX} Ambiguous companion association for ${file.path}: ${paths}`);
-      new Notice(`Multiple companion notes declare ${file.name} as source: ${paths}`);
-      return;
-    }
-
-    if (result.kind === "error") {
-      console.error(`${LOG_PREFIX} Failed to create companion for ${file.path}`, result.error);
-      new Notice(`Could not open or create a companion note for ${file.name}.`);
-      return;
-    }
-
-    if (result.kind === "created") {
-      if (result.conflictResolved) {
-        console.warn(`${LOG_PREFIX} Companion name conflict for ${file.path}; using ${result.path}`);
-      }
-      console.info(`${LOG_PREFIX} Companion created: ${result.note.path} (source: ${file.path})`);
-    } else {
-      console.info(`${LOG_PREFIX} Existing companion found: ${result.note.path} (source: ${file.path})`);
-    }
-
-    try {
-      await this.app.workspace.getLeaf(false).openFile(result.note);
-    } catch (error) {
-      console.error(`${LOG_PREFIX} Failed to open companion ${result.note.path}`, error);
-      new Notice(`Companion note exists but could not be opened: ${result.note.path}`);
-    }
-  }
-
-  private async createCompanionBatch(files: readonly TAbstractFile[]): Promise<void> {
-    const eligibleFiles = files.filter(isEligibleFile);
-    const ignored = files.length - eligibleFiles.length;
-    const index = this.getCompanionIndexOrNotify(false);
-    if (index == null) {
-      this.showBatchSummary(0, 0, ignored, eligibleFiles.length);
-      return;
-    }
-
-    let created = 0;
-    let alreadyExisting = 0;
-    let errors = 0;
-    let modelLoaded = false;
-    let modelContent: string | null | undefined = null;
-
-    for (const file of eligibleFiles) {
-      if ((index.bySourcePath.get(file.path) ?? []).length === 0 && !modelLoaded) {
-        modelContent = await this.readCompanionTemplateOrNotify();
-        modelLoaded = true;
-      }
-      if ((index.bySourcePath.get(file.path) ?? []).length === 0 && modelContent === undefined) {
-        errors += 1;
-        continue;
-      }
-
-      const result = await createCompanionIfNeeded(this.app, file, index, modelContent ?? null);
-      if (result.kind === "created") {
-        created += 1;
-        if (result.conflictResolved) {
-          console.warn(`${LOG_PREFIX} Companion name conflict for ${file.path}; using ${result.path}`);
-        }
-        console.info(`${LOG_PREFIX} Companion created: ${result.note.path} (source: ${file.path})`);
-      } else if (result.kind === "alreadyExisting") {
-        alreadyExisting += 1;
-        console.info(`${LOG_PREFIX} Existing companion found: ${result.note.path} (source: ${file.path})`);
-      } else if (result.kind === "ambiguous") {
-        errors += 1;
-        console.error(
-          `${LOG_PREFIX} Ambiguous companion association for ${file.path}: ${result.notes
-            .map((note) => note.path)
-            .join(", ")}`
-        );
-      } else {
-        errors += 1;
-        console.error(`${LOG_PREFIX} Failed to create companion for ${file.path}`, result.error);
-      }
-    }
-
-    this.showBatchSummary(created, alreadyExisting, ignored, errors);
-  }
-
-  private getCompanionIndexOrNotify(notify = true): CompanionIndex | null {
-    const index = buildCompanionIndex(this.app);
-    if (index.missingMetadata.length === 0) {
-      return index;
-    }
-
-    console.error(
-      `${LOG_PREFIX} Companion discovery stopped because metadata is unavailable for: ${index.missingMetadata.join(", ")}`
-    );
-    if (notify) {
-      new Notice("Companion notes could not be checked because Obsidian metadata is not ready.");
-    }
-    return null;
-  }
-
-  private showBatchSummary(created: number, alreadyExisting: number, ignored: number, errors: number): void {
-    const parts = [`${created} created`, `${alreadyExisting} already existed`];
-    if (ignored > 0) {
-      parts.push(`${ignored} ignored`);
-    }
-    parts.push(`${errors} failed`);
-    const message = `Companion notes: ${parts.join(", ")}.`;
-    console.info(`${LOG_PREFIX} ${message}`);
-    new Notice(message);
   }
 
   private startNotebookNavigatorRegistration(): void {
@@ -393,34 +249,28 @@ export default class MoveAttachmentsWithNotePlugin extends Plugin {
 
     const dispose = api.menus.registerFileMenu((context) => {
       if (context.selection.mode === "multiple") {
-        if (context.selection.files.length >= 2 && context.selection.files.some(isEligibleFile)) {
+        const eligibleFiles = context.selection.files.filter(isEligibleFile);
+        if (eligibleFiles.length > 0) {
           context.addItem((item) => {
-            item.setTitle("Create companion notes");
-            item.setIcon("files");
-            item.onClick(() => this.createCompanionBatch(context.selection.files));
+            item.setTitle("Create note for selected files");
+            item.setIcon("file-plus-2");
+            item.onClick(() => this.createNoteFromSelection(eligibleFiles));
           });
-          if (context.selection.files.filter(isEligibleFile).length >= 2) {
-            context.addItem((item) => {
-              item.setTitle("Create collection note from selected files");
-              item.setIcon("notebook-tabs");
-              item.onClick(() => this.createCollectionFromSelection(context.selection.files));
-            });
-          }
         }
         return;
       }
 
       if (isEligibleFile(context.file)) {
         context.addItem((item) => {
-          item.setTitle("Open or create companion note");
+          item.setTitle("Create note for file");
           item.setIcon("file-plus-2");
-          item.onClick(() => this.openOrCreateCompanion(context.file));
+          item.onClick(() => this.createNoteFromSelection([context.file]));
         });
       }
     });
     this.notebookNavigatorMenusRegistered = true;
     this.register(dispose);
-    console.info(`${LOG_PREFIX} Notebook Navigator companion menus registered`);
+    console.info(`${LOG_PREFIX} Notebook Navigator linked-note menus registered`);
     return true;
   }
 

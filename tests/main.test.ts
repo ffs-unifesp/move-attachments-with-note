@@ -202,7 +202,7 @@ describe("Move Attachments With Note", () => {
     expect(filesByPath.has("QA/T10/B/report e-acute é.pdf")).toBe(true);
   });
 
-  it("T11: moving a companion note moves its source file once", async () => {
+  it("T11: moving a linked note moves its referenced file once", async () => {
     const { plugin, fileManager, filesByPath } = setupPlugin({
       files: ["QA/T11/A/photo.jpg"],
       resolvedLinks: {
