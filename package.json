@@ -1,6 +1,6 @@
 {
   "name": "move-attachments-with-note",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Obsidian plugin to move attachments with notes and create linked notes from selected files.",
   "main": "main.js",
   "scripts": {
